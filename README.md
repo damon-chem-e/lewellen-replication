@@ -41,48 +41,77 @@ lewellen-replication/
 │   ├── raw_merged_data.csv     # Raw merged data from Compustat and CRSP
 │   ├── constructed_variables.csv # Data with constructed variables
 │   └── regression_sample.csv   # Final regression sample
-├── notebooks/
-│   └── analysis.ipynb          # Jupyter notebook for analysis
+├── results/
+│   ├── tables/                 # Regression tables and comparison results
+│   └── plots/                  # Visualizations and figures
 ├── src/
 │   ├── utils.py                # Utility functions
 │   ├── data_collection.py      # Data collection from WRDS
 │   ├── variable_construction.py # Variable construction
 │   ├── sample_preparation.py   # Sample filtering and preparation
-│   ├── main.py                 # Main script to run the pipeline
-│   └── regression_analysis.py  # Regression analysis
+│   ├── regression_analysis.py  # Regression analysis implementation
+│   ├── analyze_results.py      # Analysis and visualization functions
+│   └── main.py                 # Main script to run the pipeline
 └── README.md                   # This file
 ```
 
 ## Usage
 
-### 1. Data Preparation
+### Command-Line Options
 
-The entire data preparation pipeline can be run using the main script:
+The main script (`src/main.py`) accepts several command-line arguments:
 
+```
+python src/main.py [--start_year YEAR] [--end_year YEAR] [--force_refresh] [--run_analysis] [--analysis_only]
+```
+
+- `--start_year`: Start year for data collection (default: 1971)
+- `--end_year`: End year for data collection (default: 2023)
+- `--force_refresh`: Force refresh of all data files even if they exist
+- `--run_analysis`: Run analysis after preparing the data
+- `--analysis_only`: Skip data preparation and only run analysis
+
+### Example Usage
+
+1. Run the full pipeline with default settings:
 ```
 python src/main.py
 ```
 
-This will:
-1. Collect raw data from WRDS (Compustat and CRSP)
-2. Construct all necessary variables
-3. Prepare the regression sample with filtering criteria
-4. Save all intermediate and final datasets
-
-### 2. Individual Steps
-
-You can also run each step separately:
-
+2. Run with custom time period:
 ```
-# Step 1: Data Collection
-python src/data_collection.py
-
-# Step 2: Variable Construction
-python src/variable_construction.py
-
-# Step 3: Sample Preparation
-python src/sample_preparation.py
+python src/main.py --start_year 1980 --end_year 2020
 ```
+
+3. Run data preparation and analysis:
+```
+python src/main.py --run_analysis
+```
+
+4. Run analysis only (assumes data is already prepared):
+```
+python src/main.py --analysis_only
+```
+
+5. Force refresh all data files and run analysis:
+```
+python src/main.py --force_refresh --run_analysis
+```
+
+### Analysis Results
+
+When the analysis is run, it generates:
+
+1. Tables in `results/tables/` directory:
+   - Regression results from Tables 3, 4, 6, and 7
+   - Comparison with original paper coefficients
+
+2. Plots in `results/plots/` directory:
+   - Variable distributions
+   - Investment-cash flow sensitivity
+   - Constraint group comparisons
+   - Cash flow allocation
+   - Investment financing
 
 ## Variables Constructed
 

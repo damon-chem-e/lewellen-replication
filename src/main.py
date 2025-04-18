@@ -3,12 +3,17 @@ Main script for Lewellen and Lewellen (2016) Replication Study.
 
 This script orchestrates the entire data preparation pipeline by calling
 modules for data collection, variable construction, and sample preparation.
+It can also run the analysis after preparing the data.
+
+Usage:
+    python main.py [--start_year YEAR] [--end_year YEAR] [--force_refresh] [--run_analysis]
 """
 
 import os
 import sys
 import pandas as pd
 import time
+import argparse
 from datetime import datetime
 
 # Add project directory to path
@@ -18,6 +23,16 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from src.data_collection import collect_raw_data
 from src.variable_construction import construct_variables, save_constructed_data
 from src.sample_preparation import prepare_regression_sample, save_regression_sample
+from src.analyze_results import (
+    create_results_directory,
+    analyze_sample_characteristics,
+    analyze_constraint_groups,
+    run_baseline_analysis,
+    analyze_cash_flow_uses,
+    analyze_investment_financing,
+    compare_with_original_paper,
+    run_full_regression_analysis
+)
 
 
 def check_data_directory():
@@ -123,9 +138,116 @@ def run_pipeline(start_year=1971, end_year=2023, force_refresh=False):
     return regression_sample
 
 
-if __name__ == '__main__':
-    # Run the pipeline with default parameters
-    regression_data = run_pipeline(start_year=1971, end_year=2023, force_refresh=False)
+def run_analysis(data_path=None, output_dir=None):
+    """
+    Run analysis on the prepared regression sample.
     
-    # If you want to rerun with different parameters, uncomment and modify:
-    # regression_data = run_pipeline(start_year=1980, end_year=2020, force_refresh=True) 
+    Args:
+        data_path (str): Path to regression sample data
+        output_dir (str): Directory to save results
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    # Set default paths if not provided
+    if data_path is None:
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+        data_path = os.path.join(data_dir, 'regression_sample.csv')
+    
+    if output_dir is None:
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'results')
+    
+    # Check if data file exists
+    if not os.path.exists(data_path):
+        print(f"Error: Data file not found at {data_path}")
+        print("Please run main.py first to prepare the data.")
+        return False
+    
+    # Create results directories
+    tables_dir, plots_dir = create_results_directory(output_dir)
+    
+    # Load data
+    print(f"\nLoading regression sample from {data_path}")
+    data = pd.read_csv(data_path)
+    print(f"Loaded {len(data)} observations")
+    
+    # Run analyses
+    start_time = datetime.now()
+    print(f"Analysis started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-" * 80)
+    
+    analyze_sample_characteristics(data, plots_dir)
+    analyze_constraint_groups(data, plots_dir)
+    run_baseline_analysis(data, plots_dir)
+    analyze_cash_flow_uses(data, plots_dir)
+    analyze_investment_financing(data, plots_dir)
+    compare_with_original_paper(data, tables_dir)
+    run_full_regression_analysis(data, tables_dir, plots_dir)
+    
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds() / 60
+    print("-" * 80)
+    print(f"Analysis completed at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Total runtime: {duration:.2f} minutes")
+    print(f"Results saved to {output_dir}")
+    
+    return True
+
+
+def main():
+    """
+    Parse command line arguments and run the appropriate pipeline steps.
+    """
+    parser = argparse.ArgumentParser(
+        description='Run Lewellen and Lewellen (2016) replication study'
+    )
+    parser.add_argument(
+        '--start_year', 
+        type=int, 
+        default=1971,
+        help='Start year for data collection (default: 1971)'
+    )
+    parser.add_argument(
+        '--end_year', 
+        type=int, 
+        default=2023,
+        help='End year for data collection (default: 2023)'
+    )
+    parser.add_argument(
+        '--force_refresh', 
+        action='store_true',
+        help='Force refresh of all data files even if they exist'
+    )
+    parser.add_argument(
+        '--run_analysis', 
+        action='store_true',
+        help='Run analysis after preparing the data'
+    )
+    parser.add_argument(
+        '--analysis_only', 
+        action='store_true',
+        help='Skip data preparation and only run analysis'
+    )
+    
+    args = parser.parse_args()
+    
+    # Run analysis only if requested
+    if args.analysis_only:
+        print("Skipping data preparation and running analysis only")
+        run_analysis()
+        return
+    
+    # Run data preparation pipeline
+    regression_data = run_pipeline(
+        start_year=args.start_year,
+        end_year=args.end_year,
+        force_refresh=args.force_refresh
+    )
+    
+    # Run analysis if requested
+    if args.run_analysis and regression_data is not None:
+        run_analysis()
+
+
+if __name__ == '__main__':
+    main() 
