@@ -8,7 +8,12 @@ according to the criteria specified in the original paper.
 import pandas as pd
 import numpy as np
 import os
-from utils import compute_nyse_size_percentile
+
+# Fix import path
+try:
+    from utils import compute_nyse_size_percentile
+except ModuleNotFoundError:
+    from src.utils import compute_nyse_size_percentile
 
 
 def filter_by_nyse_percentile(data, cutoff=0.1, year_col='fyear', assets_col='net_assets'):
@@ -24,7 +29,7 @@ def filter_by_nyse_percentile(data, cutoff=0.1, year_col='fyear', assets_col='ne
     Returns:
         pd.DataFrame: Filtered data
     """
-    # Compute NYSE size percentiles
+    # Compute NYSE size percentiles using specified asset base (beginning-of-year)
     data = compute_nyse_size_percentile(data, year_col, assets_col)
     
     # Filter out firms below cutoff
@@ -35,7 +40,7 @@ def filter_by_nyse_percentile(data, cutoff=0.1, year_col='fyear', assets_col='ne
     filtered_assets = filtered_data[assets_col].sum()
     pct_assets = (filtered_assets / total_assets) * 100
     
-    print(f"Filtered out firms below NYSE {cutoff*100:.0f}th percentile")
+    print(f"Filtered out firms below NYSE {cutoff*100:.0f}th percentile (based on {assets_col})")
     print(f"Original observations: {len(data)}")
     print(f"Filtered observations: {len(filtered_data)}")
     print(f"Retained {pct_assets:.1f}% of total asset value")
@@ -175,8 +180,10 @@ def prepare_regression_sample(data, min_years=3):
     # Filter missing data on required variables
     sample = filter_missing_data(data, required_vars)
     
-    # Filter by NYSE size percentile
-    sample = filter_by_nyse_percentile(sample, cutoff=0.1)
+    # Filter by NYSE size percentile (10th) using beginning-of-year net assets
+    if 'net_assets_lag' not in sample.columns:
+        sample['net_assets_lag'] = sample.groupby('gvkey')['net_assets'].shift(1)
+    sample = filter_by_nyse_percentile(sample, cutoff=0.1, assets_col='net_assets_lag')
     
     # Ensure we have enough consecutive years for lagged variables
     sample = ensure_balanced_panel(sample, min_years=min_years)

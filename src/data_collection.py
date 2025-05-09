@@ -9,7 +9,12 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import os
-from utils import connect_to_wrds
+
+# Fix import path
+try:
+    from utils import connect_to_wrds
+except ModuleNotFoundError:
+    from src.utils import connect_to_wrds
 
 
 def query_compustat_annual(conn, start_year=1971, end_year=2023):
@@ -30,7 +35,7 @@ def query_compustat_annual(conn, start_year=1971, end_year=2023):
     query = f"""
     SELECT 
         gvkey, datadate, fyear, indfmt, consol, popsrc, datafmt, tic, cusip, sic,
-        at, lct, dlc, ibc, xidoc, dpc, txdc, esubc, sppiv, fopo, ppent, capx, aqc,
+        at, lct, dlc, ib, ibc, dp, dpc, oancf, xidoc, txdc, esubc, sppiv, fopo, ppent, capx, aqc,
         ivch, siv, che, act, dltt, lt, ceq, pstk, re, dvc, dvp, sale, exchg
     FROM comp.funda
     WHERE 

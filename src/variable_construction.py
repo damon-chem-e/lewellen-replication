@@ -8,7 +8,12 @@ replication study, as described in the original paper.
 import pandas as pd
 import numpy as np
 import os
-from utils import winsorize
+
+# Fix import path
+try:
+    from utils import winsorize
+except ModuleNotFoundError:
+    from src.utils import winsorize
 
 
 def calculate_net_assets(data):
@@ -24,12 +29,11 @@ def calculate_net_assets(data):
     # NET_ASSETS = AT - (LCT - DLC)
     data['net_assets'] = data['at'] - (data['lct'] - data['dlc'])
     
-    # Replace any zero or negative values with a small positive value
-    mask = data['net_assets'] <= 0
-    if mask.any():
-        print(f"Warning: {mask.sum()} observations with zero or negative net assets, replacing with min positive value.")
-        min_positive = data.loc[data['net_assets'] > 0, 'net_assets'].min()
-        data.loc[mask, 'net_assets'] = min_positive * 0.01
+    # Drop observations with non-positive net assets – they are not in the paper's sample
+    neg_count = (data['net_assets'] <= 0).sum()
+    if neg_count > 0:
+        print(f"Dropping {neg_count} observations with non-positive net assets")
+        data = data[data['net_assets'] > 0].copy()
     
     return data
 
@@ -38,7 +42,7 @@ def calculate_cash_flow(data):
     """
     Calculate cash flow using Statement of Cash Flows approach.
     
-    CF = IBC + XIDOC + DPC + TXDC + ESUBC + SPPIV + FOPO
+    CF = PROF (ib) + DEPR (dp) + OTHCF  →  equals Compustat OANCF when available.
     
     Args:
         data (pd.DataFrame): Input data frame
@@ -46,23 +50,31 @@ def calculate_cash_flow(data):
     Returns:
         pd.DataFrame: Data with cash_flow column added
     """
-    # Fill NA values for components with 0
-    cf_components = ['ibc', 'xidoc', 'dpc', 'txdc', 'esubc', 'sppiv', 'fopo']
-    for col in cf_components:
-        if col in data.columns:
+    # Choose appropriate income and depreciation variables
+    inc_col = 'ib' if 'ib' in data.columns else 'ibc'  # fallback to ibc
+    dep_col = 'dp' if 'dp' in data.columns else 'dpc'
+
+    # Ensure required cols exist
+    for col in [inc_col, dep_col]:
+        if col not in data.columns:
+            data[col] = 0.0
+
+    # If Compustat provides OANCF, use it directly (it already equals PROF+DEPR+OTHCF)
+    if 'oancf' in data.columns:
+        data['cash_flow'] = data['oancf']
+    else:
+        # Otherwise reconstruct using other components available (close to paper definition)
+        cf_components = ['xidoc', 'txdc', 'esubc', 'sppiv', 'fopo']
+        for col in cf_components:
+            if col not in data.columns:
+                data[col] = 0.0
             data[col] = data[col].fillna(0)
-    
-    # Calculate cash flow
-    data['cash_flow'] = (data['ibc'] + 
-                         data['xidoc'].fillna(0) + 
-                         data['dpc'].fillna(0) + 
-                         data['txdc'].fillna(0) + 
-                         data['esubc'].fillna(0) + 
-                         data['sppiv'].fillna(0) + 
-                         data['fopo'].fillna(0))
-    
-    # Calculate traditional measure for comparison
-    data['trad_cash_flow'] = data['ibc'] + data['dpc']
+
+        data['cash_flow'] = (data[inc_col].fillna(0) + data[dep_col].fillna(0) +
+                             data['xidoc'] + data['txdc'] + data['esubc'] + data['sppiv'] + data['fopo'])
+
+    # Traditional measure: PROF + DEPR (ib + dp)
+    data['trad_cash_flow'] = data[inc_col] + data[dep_col]
     
     return data
 
@@ -208,11 +220,24 @@ def scale_variables(data):
     Returns:
         pd.DataFrame: Data with scaled variables
     """
-    # Calculate average net assets
-    data['avg_net_assets'] = (data['net_assets'] + data['net_assets'].groupby('gvkey').shift(1)) / 2
+    # Make a copy to avoid SettingWithCopyWarning
+    result = data.copy()
     
-    # Replace missing values with current net assets (first observations)
-    data['avg_net_assets'] = data['avg_net_assets'].fillna(data['net_assets'])
+    # Sort by gvkey and date for correct lagged calculations
+    if 'gvkey' in result.columns and 'datadate' in result.columns:
+        result = result.sort_values(['gvkey', 'datadate'])
+        
+        # Calculate average net assets
+        result['net_assets_lag'] = result.groupby('gvkey')['net_assets'].shift(1)
+        result['avg_net_assets'] = (result['net_assets'] + result['net_assets_lag'].fillna(0)) / 2
+        
+        # Replace zero averages with current net assets
+        mask = result['avg_net_assets'] <= 0
+        result.loc[mask, 'avg_net_assets'] = result.loc[mask, 'net_assets']
+    else:
+        # If missing required columns, use net_assets as fallback
+        print("Warning: Missing gvkey or datadate columns for proper scaling.")
+        result['avg_net_assets'] = result['net_assets']
     
     # List of variables to scale
     scale_vars = [
@@ -222,10 +247,10 @@ def scale_variables(data):
     
     # Scale variables
     for var in scale_vars:
-        if var in data.columns:
-            data[f'{var}_scaled'] = data[var] / data['avg_net_assets']
+        if var in result.columns:
+            result[f'{var}_scaled'] = result[var] / result['avg_net_assets']
     
-    return data
+    return result
 
 
 def prepare_financial_constraint_measures(data):
@@ -266,43 +291,67 @@ def construct_variables(data, winsorize_limits=(0.01, 0.01)):
     Returns:
         pd.DataFrame: Data with all constructed variables
     """
+    # Make a copy of the data
+    result = data.copy()
+    
     # Basic data cleaning
-    data = data.dropna(subset=['at', 'lct', 'dlc'])  # Require non-missing for net assets
+    result = result.dropna(subset=['at', 'lct', 'dlc'])  # Require non-missing for net assets
+    
+    # Exclude regulated utilities (SIC 4900–4999) and financials (SIC 6000–6999)
+    if 'sic' in result.columns:
+        before_sic = len(result)
+        result = result[((result['sic'] < 4900) | (result['sic'] > 4999)) &
+                        ((result['sic'] < 6000) | (result['sic'] > 6999) | (result['sic'].isna()))]
+        print(f"Removed {before_sic - len(result)} utility/financial firm-year observations based on SIC")
+    
+    # Print initial dataset size
+    print(f"Starting with {len(result)} observations after removing missing values")
     
     # Step 1: Calculate Net Assets
-    data = calculate_net_assets(data)
+    result = calculate_net_assets(result)
     
     # Step 2: Calculate Cash Flow
-    data = calculate_cash_flow(data)
+    result = calculate_cash_flow(result)
     
     # Step 3: Calculate Investment Measures
-    data = calculate_investment_measures(data)
+    result = calculate_investment_measures(result)
     
     # Step 4: Calculate Other Uses of Cash Flow
-    data = calculate_other_cash_uses(data)
+    result = calculate_other_cash_uses(result)
     
     # Step 5: Calculate Market-to-Book Ratio
-    data = calculate_market_to_book(data)
+    result = calculate_market_to_book(result)
     
     # Step 6: Calculate Returns
-    data = calculate_returns(data)
+    result = calculate_returns(result)
     
     # Step 7: Scale Variables
-    data = scale_variables(data)
+    result = scale_variables(result)
     
     # Step 8: Prepare Financial Constraint Measures
-    data = prepare_financial_constraint_measures(data)
+    result = prepare_financial_constraint_measures(result)
     
-    # Winsorize variables to mitigate outliers
+    # Check availability of variables to winsorize
     vars_to_winsorize = [
         'cash_flow_scaled', 'trad_cash_flow_scaled', 
         'capx1_scaled', 'capx2_scaled', 'capx3_scaled',
         'delta_cash_scaled', 'delta_nwc_scaled', 'delta_debt_scaled', 
         'issues_scaled', 'div_scaled', 'mb', 'mb_lag'
     ]
-    data = winsorize(data, vars_to_winsorize, winsorize_limits)
     
-    return data
+    # Filter the list to only include variables that exist in the data
+    vars_exist = [var for var in vars_to_winsorize if var in result.columns]
+    if len(vars_exist) < len(vars_to_winsorize):
+        missing_vars = set(vars_to_winsorize) - set(vars_exist)
+        print(f"Warning: The following variables are missing and won't be winsorized: {missing_vars}")
+    
+    # Annual winsorise variables within each fiscal year
+    if vars_exist:
+        from src.utils import winsorize_by_year  # local import to avoid circular
+        result = winsorize_by_year(result, vars_exist, winsorize_limits, year_col='fyear')
+    
+    print(f"Completed variable construction with {len(result)} observations")
+    return result
 
 
 def save_constructed_data(data, file_name='constructed_variables.csv'):

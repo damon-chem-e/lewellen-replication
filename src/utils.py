@@ -9,11 +9,21 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-import wrds
 from datetime import datetime
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from config import wrds_credentials
+
+# Import wrds conditionally - we don't need it for analysis-only mode
+try:
+    import wrds
+    # Try to import credentials, but don't fail if they're not available
+    try:
+        from config import wrds_credentials
+        HAS_WRDS_CREDENTIALS = True
+    except ImportError:
+        HAS_WRDS_CREDENTIALS = False
+except ImportError:
+    HAS_WRDS_CREDENTIALS = False
 
 
 def connect_to_wrds():
@@ -21,8 +31,12 @@ def connect_to_wrds():
     Establish a connection to WRDS database.
     
     Returns:
-        wrds.Connection: A connection object to the WRDS database
+        wrds.Connection: A connection object to the WRDS database, or None if connection fails
     """
+    if not HAS_WRDS_CREDENTIALS:
+        print("WRDS credentials not available. Skipping connection.")
+        return None
+    
     try:
         conn = wrds.Connection(wrds_username=wrds_credentials.wrds_username,
                               wrds_password=wrds_credentials.wrds_password)
@@ -54,6 +68,41 @@ def winsorize(data, columns, limits=(0.01, 0.01)):
     return result
 
 
+# -----------------------------------------------------------------------------
+# NEW: Annual (within-year) winsorisation to match Lewellen & Lewellen (2016)
+# -----------------------------------------------------------------------------
+
+def winsorize_by_year(data, columns, limits=(0.01, 0.01), year_col='fyear'):
+    """Winsorize columns year-by-year.
+
+    Args:
+        data (pd.DataFrame): DataFrame containing the data.
+        columns (list): Column names to winsorize.
+        limits (tuple): (lower, upper) percentiles to clip at, e.g. (0.01,0.01).
+        year_col (str): Column identifying fiscal year.
+
+    Returns:
+        pd.DataFrame: Copy with winsorized columns.
+    """
+    if year_col not in data.columns:
+        raise ValueError(f"'{year_col}' column not found for annual winsorisation")
+
+    result = data.copy()
+    for col in columns:
+        if col not in result.columns:
+            continue
+
+        def _clip(s):
+            lower = s.quantile(limits[0])
+            upper = s.quantile(1 - limits[1])
+            return s.clip(lower, upper)
+
+        result[col] = result.groupby(year_col)[col].transform(_clip)
+
+    return result
+
+
+# Updated to allow arbitrary asset column (default unchanged)
 def compute_nyse_size_percentile(data, year_col='fyear', assets_col='net_assets'):
     """
     Compute NYSE size percentiles for each year in the data.
@@ -68,13 +117,15 @@ def compute_nyse_size_percentile(data, year_col='fyear', assets_col='net_assets'
     """
     result = data.copy()
     
-    # Identify NYSE firms (exchg=1 in CRSP)
+    # Identify NYSE firms (exchg == 1 in Compustat/CRSP merge)
     nyse_firms = result[result['exchg'] == 1].copy()
     
     # Calculate percentiles by year for NYSE firms
     percentiles = {}
     for year in nyse_firms[year_col].unique():
-        year_data = nyse_firms[nyse_firms[year_col] == year][assets_col]
+        year_data = nyse_firms[nyse_firms[year_col] == year][assets_col].dropna()
+        if year_data.empty:
+            continue
         percentiles[year] = {
             p/100: np.percentile(year_data, p) 
             for p in range(1, 100)

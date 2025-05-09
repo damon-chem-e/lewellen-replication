@@ -394,15 +394,28 @@ def analyze_investment_financing(data, plots_dir):
     constrained_firms = investing_firms[investing_firms['constrained'] == 1]
     unconstrained_firms = investing_firms[investing_firms['unconstrained'] == 1]
     
+    # Check if we have both groups represented
+    has_constrained = len(constrained_firms) > 0
+    has_unconstrained = len(unconstrained_firms) > 0
+    
+    print(f"Investing firms with constraint data: {len(investing_firms)} observations")
+    print(f"Constrained investing firms: {len(constrained_firms)} observations")
+    print(f"Unconstrained investing firms: {len(unconstrained_firms)} observations")
+    
+    # Create financing by group dataframe
     financing_by_group = pd.DataFrame({
-        'All Firms': investing_firms[[f'{col}_pct' for col in financing_cols]].mean(),
-        'Constrained': constrained_firms[[f'{col}_pct' for col in financing_cols]].mean(),
-        'Unconstrained': unconstrained_firms[[f'{col}_pct' for col in financing_cols]].mean()
+        'All Firms': investing_firms[[f'{col}_pct' for col in financing_cols]].mean()
     })
+    
+    if has_constrained:
+        financing_by_group['Constrained'] = constrained_firms[[f'{col}_pct' for col in financing_cols]].mean()
+    
+    if has_unconstrained:
+        financing_by_group['Unconstrained'] = unconstrained_firms[[f'{col}_pct' for col in financing_cols]].mean()
     
     financing_by_group.to_csv(os.path.join(plots_dir, 'financing_by_constraint.csv'))
     
-    # Plot financing sources
+    # Plot financing sources for all firms
     plt.figure(figsize=(10, 6))
     plt.pie(financing_props.abs(), labels=financing_props.index, autopct='%1.1f%%', 
             startangle=90, colors=sns.color_palette("pastel", len(financing_props)))
@@ -413,21 +426,44 @@ def analyze_investment_financing(data, plots_dir):
     plt.close()
     
     # Plot financing sources by constraint group
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    if has_constrained and has_unconstrained:
+        # Both groups present - create side-by-side plot
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+        
+        # Constrained firms
+        ax1.pie(constrained_firms[[f'{col}_pct' for col in financing_cols]].mean().abs(), 
+                labels=financing_cols, autopct='%1.1f%%', 
+                startangle=90, colors=sns.color_palette("pastel", len(financing_cols)))
+        ax1.set_title('Constrained Firms')
+        
+        # Unconstrained firms
+        ax2.pie(unconstrained_firms[[f'{col}_pct' for col in financing_cols]].mean().abs(), 
+                labels=financing_cols, autopct='%1.1f%%', 
+                startangle=90, colors=sns.color_palette("pastel", len(financing_cols)))
+        ax2.set_title('Unconstrained Firms')
+        
+        plt.suptitle('Investment Financing by Constraint Status', fontsize=16)
+    elif has_unconstrained:
+        # Only unconstrained firms present
+        plt.figure(figsize=(10, 6))
+        plt.pie(unconstrained_firms[[f'{col}_pct' for col in financing_cols]].mean().abs(), 
+                labels=financing_cols, autopct='%1.1f%%', 
+                startangle=90, colors=sns.color_palette("pastel", len(financing_cols)))
+        plt.axis('equal')
+        plt.title('Investment Financing: Unconstrained Firms')
+    elif has_constrained:
+        # Only constrained firms present
+        plt.figure(figsize=(10, 6))
+        plt.pie(constrained_firms[[f'{col}_pct' for col in financing_cols]].mean().abs(), 
+                labels=financing_cols, autopct='%1.1f%%', 
+                startangle=90, colors=sns.color_palette("pastel", len(financing_cols)))
+        plt.axis('equal')
+        plt.title('Investment Financing: Constrained Firms')
+    else:
+        # Neither group present - skip this plot
+        print("No firms classified as constrained or unconstrained for financing analysis")
+        return
     
-    # Constrained firms
-    ax1.pie(constrained_firms[[f'{col}_pct' for col in financing_cols]].mean().abs(), 
-            labels=financing_cols, autopct='%1.1f%%', 
-            startangle=90, colors=sns.color_palette("pastel", len(financing_cols)))
-    ax1.set_title('Constrained Firms')
-    
-    # Unconstrained firms
-    ax2.pie(unconstrained_firms[[f'{col}_pct' for col in financing_cols]].mean().abs(), 
-            labels=financing_cols, autopct='%1.1f%%', 
-            startangle=90, colors=sns.color_palette("pastel", len(financing_cols)))
-    ax2.set_title('Unconstrained Firms')
-    
-    plt.suptitle('Investment Financing by Constraint Status', fontsize=16)
     plt.tight_layout()
     plt.savefig(os.path.join(plots_dir, 'financing_by_constraint.png'), dpi=300)
     plt.close()
@@ -449,38 +485,15 @@ def compare_with_original_paper(data, tables_dir):
     constrained = data[data['constrained'] == 1]
     unconstrained = data[data['unconstrained'] == 1]
     
-    # Run OLS regressions
-    ols_results = run_ols_regression(
-        data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-        fe_firm=True, fe_year=True
-    )
+    # Check if we have both constraint groups
+    has_constrained = len(constrained) > 0
+    has_unconstrained = len(unconstrained) > 0
     
-    constrained_results = run_ols_regression(
-        constrained, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-        fe_firm=True, fe_year=True
-    )
+    print(f"Full sample size: {len(data)} observations")
+    print(f"Constrained subsample: {len(constrained)} observations")
+    print(f"Unconstrained subsample: {len(unconstrained)} observations")
     
-    unconstrained_results = run_ols_regression(
-        unconstrained, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-        fe_firm=True, fe_year=True
-    )
-    
-    # Run IV regression
-    instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-    first_stage, second_stage = run_iv_regression(
-        data, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
-    )
-    
-    # Run IV regressions for constrained and unconstrained firms
-    first_stage_c, second_stage_c = run_iv_regression(
-        constrained, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
-    )
-    
-    first_stage_u, second_stage_u = run_iv_regression(
-        unconstrained, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
-    )
-    
-    # Create comparison table
+    # Original paper values
     original_values = {
         'OLS_Full': 0.35,
         'OLS_Constrained': 0.72,
@@ -490,21 +503,91 @@ def compare_with_original_paper(data, tables_dir):
         'IV_Unconstrained': 0.16
     }
     
-    replication_values = {
-        'OLS_Full': ols_results.params['cash_flow_scaled'],
-        'OLS_Constrained': constrained_results.params['cash_flow_scaled'],
-        'OLS_Unconstrained': unconstrained_results.params['cash_flow_scaled'],
-        'IV_Full': second_stage.params['cash_flow_scaled'],
-        'IV_Constrained': second_stage_c.params['cash_flow_scaled'],
-        'IV_Unconstrained': second_stage_u.params['cash_flow_scaled']
-    }
+    # Initialize replication values
+    replication_values = {}
     
-    comparison = pd.DataFrame({
-        'Original': original_values,
-        'Replication': replication_values,
-        'Difference': {k: replication_values[k] - original_values[k] for k in original_values},
-        'Percent Diff': {k: (replication_values[k] / original_values[k] - 1) * 100 for k in original_values}
-    })
+    # Run OLS regressions
+    ols_results = run_ols_regression(
+        data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
+        fe_firm=True, fe_year=True
+    )
+    replication_values['OLS_Full'] = ols_results.params['cash_flow_scaled']
+    
+    # Run IV regression for full sample
+    instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
+    
+    try:
+        first_stage, second_stage = run_iv_regression(
+            data, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
+        )
+        replication_values['IV_Full'] = second_stage.params['cash_flow_scaled']
+    except Exception as e:
+        print(f"Warning: Could not run IV regression for full sample: {e}")
+        replication_values['IV_Full'] = None
+    
+    # Run regressions for constrained firms if available
+    if has_constrained:
+        try:
+            constrained_results = run_ols_regression(
+                constrained, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
+                fe_firm=True, fe_year=True
+            )
+            replication_values['OLS_Constrained'] = constrained_results.params['cash_flow_scaled']
+            
+            first_stage_c, second_stage_c = run_iv_regression(
+                constrained, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
+            )
+            replication_values['IV_Constrained'] = second_stage_c.params['cash_flow_scaled']
+        except Exception as e:
+            print(f"Warning: Could not run regressions for constrained firms: {e}")
+            replication_values['OLS_Constrained'] = None
+            replication_values['IV_Constrained'] = None
+    else:
+        print("No constrained firms in sample, skipping constrained regressions")
+        replication_values['OLS_Constrained'] = None
+        replication_values['IV_Constrained'] = None
+    
+    # Run regressions for unconstrained firms if available
+    if has_unconstrained:
+        try:
+            unconstrained_results = run_ols_regression(
+                unconstrained, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
+                fe_firm=True, fe_year=True
+            )
+            replication_values['OLS_Unconstrained'] = unconstrained_results.params['cash_flow_scaled']
+            
+            first_stage_u, second_stage_u = run_iv_regression(
+                unconstrained, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
+            )
+            replication_values['IV_Unconstrained'] = second_stage_u.params['cash_flow_scaled']
+        except Exception as e:
+            print(f"Warning: Could not run regressions for unconstrained firms: {e}")
+            replication_values['OLS_Unconstrained'] = None
+            replication_values['IV_Unconstrained'] = None
+    else:
+        print("No unconstrained firms in sample, skipping unconstrained regressions")
+        replication_values['OLS_Unconstrained'] = None
+        replication_values['IV_Unconstrained'] = None
+    
+    # Create comparison dataframe
+    comparison_data = {'Original': original_values, 'Replication': replication_values}
+    
+    # Calculate differences only for values that exist
+    diff_data = {}
+    pct_diff_data = {}
+    
+    for k in original_values.keys():
+        if replication_values.get(k) is not None:
+            diff_data[k] = replication_values[k] - original_values[k]
+            pct_diff_data[k] = (replication_values[k] / original_values[k] - 1) * 100
+        else:
+            diff_data[k] = None
+            pct_diff_data[k] = None
+    
+    comparison_data['Difference'] = diff_data
+    comparison_data['Percent Diff'] = pct_diff_data
+    
+    comparison = pd.DataFrame(comparison_data)
     
     # Print comparison
     print("Comparison of key coefficients with original paper:")
@@ -513,23 +596,34 @@ def compare_with_original_paper(data, tables_dir):
     # Save comparison
     comparison.to_csv(os.path.join(tables_dir, 'paper_comparison.csv'))
     
-    # Create visual comparison
+    # Create visual comparison only for available results
     plt.figure(figsize=(10, 6))
     
-    x = np.arange(len(original_values))
-    width = 0.35
+    # Filter for results that have values
+    available_keys = [k for k in replication_values.keys() if replication_values[k] is not None]
     
-    original = list(original_values.values())
-    replication = list(replication_values.values())
-    
-    plt.bar(x - width/2, original, width, label='Original Paper')
-    plt.bar(x + width/2, replication, width, label='Replication')
-    
-    plt.xlabel('Model')
-    plt.ylabel('Cash Flow Coefficient')
-    plt.title('Comparison of Cash Flow Coefficients with Original Paper')
-    plt.xticks(x, list(original_values.keys()), rotation=45)
-    plt.legend()
+    if available_keys:
+        # Create the bar chart
+        x = np.arange(len(available_keys))
+        width = 0.35
+        
+        original = [original_values[k] for k in available_keys]
+        replication = [replication_values[k] for k in available_keys]
+        
+        plt.bar(x - width/2, original, width, label='Original Paper')
+        plt.bar(x + width/2, replication, width, label='Replication')
+        
+        plt.xlabel('Model')
+        plt.ylabel('Cash Flow Coefficient')
+        plt.title('Comparison of Cash Flow Coefficients with Original Paper')
+        plt.xticks(x, available_keys, rotation=45)
+        plt.legend()
+    else:
+        # No results to plot
+        plt.text(0.5, 0.5, "No comparison results available", 
+                 horizontalalignment='center', verticalalignment='center',
+                 transform=plt.gca().transAxes)
+        plt.title('Comparison with Original Paper')
     
     plt.tight_layout()
     plt.savefig(os.path.join(tables_dir, 'paper_comparison.png'), dpi=300)
@@ -549,25 +643,51 @@ def run_full_regression_analysis(data, tables_dir, plots_dir):
     """
     print("\n=== Running Full Regression Analysis ===")
     
+    # Check if we have constrained and unconstrained groups
+    constrained = data[data['constrained'] == 1]
+    unconstrained = data[data['unconstrained'] == 1]
+    has_constraint_groups = len(constrained) > 0 and len(unconstrained) > 0
+    
     # Run Table 3 regressions (OLS investment-cash flow sensitivities)
     print("Running Table 3 regressions...")
-    table3_results = run_table3_regressions(data)
+    try:
+        table3_results = run_table3_regressions(data)
+    except Exception as e:
+        print(f"Error running Table 3 regressions: {e}")
     
     # Run Table 4 regressions (OLS by constraint)
-    print("Running Table 4 regressions...")
-    table4_results = run_table4_regressions(data)
+    if has_constraint_groups:
+        print("Running Table 4 regressions...")
+        try:
+            table4_results = run_table4_regressions(data)
+        except Exception as e:
+            print(f"Error running Table 4 regressions: {e}")
+    else:
+        print("Skipping Table 4 regressions due to missing constraint groups")
     
     # Run Table 6 regressions (IV regressions)
     print("Running Table 6 regressions...")
-    table6_results = run_table6_regressions(data)
+    try:
+        table6_results = run_table6_regressions(data)
+    except Exception as e:
+        print(f"Error running Table 6 regressions: {e}")
     
     # Run Table 7 regressions (IV by constraint)
-    print("Running Table 7 regressions...")
-    table7_results = run_table7_regressions(data)
+    if has_constraint_groups:
+        print("Running Table 7 regressions...")
+        try:
+            table7_results = run_table7_regressions(data)
+        except Exception as e:
+            print(f"Error running Table 7 regressions: {e}")
+    else:
+        print("Skipping Table 7 regressions due to missing constraint groups")
     
     # Create investment-cash flow sensitivity plots
     print("Creating investment-cash flow sensitivity plots...")
-    plot_investment_cash_flow_sensitivity(data, plots_dir)
+    try:
+        plot_investment_cash_flow_sensitivity(data, plots_dir)
+    except Exception as e:
+        print(f"Error creating investment-cash flow sensitivity plots: {e}")
     
     print("Full regression analysis completed.")
 
@@ -597,7 +717,7 @@ def main():
     # Set default paths if not provided
     if args.data_path is None:
         data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
-        args.data_path = os.path.join(data_dir, 'regression_sample.csv')
+        args.data_path = os.path.join(data_dir, 'raw_merged_data.parquet')
     
     if args.output_dir is None:
         args.output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'results')
@@ -612,21 +732,31 @@ def main():
     tables_dir, plots_dir = create_results_directory(args.output_dir)
     
     # Load data
-    print(f"Loading regression sample from {args.data_path}")
-    data = pd.read_csv(args.data_path)
+    print(f"Loading raw data from {args.data_path}")
+    data = pd.read_parquet(args.data_path)
     print(f"Loaded {len(data)} observations")
+    
+    # Perform variable construction and sample preparation directly
+    print("Constructing variables...")
+    from src.variable_construction import construct_variables
+    constructed_data = construct_variables(data)
+    
+    print("Preparing regression sample...")
+    from src.sample_preparation import prepare_regression_sample
+    regression_sample = prepare_regression_sample(constructed_data)
+    print(f"Final regression sample has {len(regression_sample)} observations")
     
     # Run analyses
     start_time = datetime.now()
     print(f"Analysis started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    analyze_sample_characteristics(data, plots_dir)
-    analyze_constraint_groups(data, plots_dir)
-    run_baseline_analysis(data, plots_dir)
-    analyze_cash_flow_uses(data, plots_dir)
-    analyze_investment_financing(data, plots_dir)
-    compare_with_original_paper(data, tables_dir)
-    run_full_regression_analysis(data, tables_dir, plots_dir)
+    analyze_sample_characteristics(regression_sample, plots_dir)
+    analyze_constraint_groups(regression_sample, plots_dir)
+    run_baseline_analysis(regression_sample, plots_dir)
+    analyze_cash_flow_uses(regression_sample, plots_dir)
+    analyze_investment_financing(regression_sample, plots_dir)
+    compare_with_original_paper(regression_sample, tables_dir)
+    run_full_regression_analysis(regression_sample, tables_dir, plots_dir)
     
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds() / 60
