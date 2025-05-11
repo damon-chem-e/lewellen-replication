@@ -168,11 +168,10 @@ def _collect_table3(source_dir: Path) -> dict[str, dict[int, pd.DataFrame]]:
 
 
 def _format_coeff(coef: float, se: float) -> str:
-    """Return coefficient with t-stat in parentheses (new-line) for LaTeX."""
+    """Return coefficient with standard error below in parentheses for LaTeX."""
     if pd.isna(coef):
         return ""
-    t_stat = coef / se if se != 0 else float("nan")
-    return f"{coef:.3f}\\n({t_stat:.2f})"
+    return f"{coef:.3f}\\\\\n({se:.3f})"
 
 
 def build_table3(source_dir: str | Path = "results/tables",
@@ -199,52 +198,73 @@ def build_table3(source_dir: str | Path = "results/tables",
     # Ensure deterministic order by dependent-variable label
     dep_vars = sorted(collected.keys(), key=lambda k: _DEP_VAR_LABELS.get(k, k))
 
-    # Build the full multi-index DataFrame
-    column_tuples: list[tuple[str, str]] = []  # (dep_var_label, model)
-    rows: dict[str, list[str]] = {k: [] for k in _VAR_ORDER}
-    rows.update({k: [] for k in _STATS_ROWS})
+    # Prepare column MultiIndex
+    column_tuples = []  # (dep_var_label, model)
+    
+    # Gather raw data
+    coef_data = {var: [] for var in _VAR_ORDER}
+    se_data = {var: [] for var in _VAR_ORDER}
+    r_squared = []
+    n_obs = []
 
     for dep in dep_vars:
         for model in sorted(collected[dep].keys()):
             df = collected[dep][model]
-            col_label = ( _DEP_VAR_LABELS[dep], f"Model {model}")
+            col_label = (_DEP_VAR_LABELS[dep], f"Model {model}")
             column_tuples.append(col_label)
 
-            # map variable rows
+            # Extract coefficients and standard errors
             for var in _VAR_ORDER:
                 subset = df[df["variable"] == var]
                 if subset.empty:
-                    rows[var].append("")
+                    coef_data[var].append("")
+                    se_data[var].append("")
                 else:
-                    coef, se = subset["coefficient"].iloc[0], subset["std_error"].iloc[0]
-                    rows[var].append(_format_coeff(coef, se))
+                    coef_data[var].append(f"{subset['coefficient'].iloc[0]:.3f}")
+                    se_data[var].append(f"({subset['std_error'].iloc[0]:.3f})")
 
-            # add stats
-            r2 = df["r_squared"].iloc[0]
-            n  = int(df["n_obs"].iloc[0])
-            rows["R-squared"].append(f"{r2:.3f}")
-            rows["Observations"].append(f"{n:,}")
+            # Store statistics
+            r_squared.append(f"{df['r_squared'].iloc[0]:.3f}")
+            n_obs.append(f"{int(df['n_obs'].iloc[0]):,}")
 
-    df_idx_order = _VAR_ORDER + _STATS_ROWS
-    # Build DataFrame with MultiIndex columns
-    columns = pd.MultiIndex.from_tuples(column_tuples, names=["Dependent", "Specification"])
-    df = pd.DataFrame(rows, index=columns).T
-    # Ensure correct row order
-    df = df.reindex(df_idx_order)
-    # Rename rows for readability
+    # Build DataFrame with alternating coefficient and SE rows
+    columns = pd.MultiIndex.from_tuples(column_tuples, names=["Dependent", "Model"])
+    
+    # Prepare rows (empty for SE rows)
+    rows = []
+    row_names = []
+    
+    # Nice row label formatting
     nice_names = {
         "cash_flow_scaled": "Cash flow",
         "cash_flow_scaled_lag": "Cash flow (t-1)",
         "cash_lag": "Cash / Assets (t-1)",
         "debt_lag": "Debt / Assets (t-1)",
         "mb_lag": "Market-to-Book (t-1)",
-        "R-squared": "R-squared",
-        "Observations": "Observations",
     }
-    df.index = [nice_names.get(idx, idx) for idx in df.index]
-
+    
+    # Add coefficient and SE rows alternately
+    for var in _VAR_ORDER:
+        # Coefficient row with label
+        rows.append(coef_data[var])
+        row_names.append(nice_names.get(var, var))
+        
+        # Standard error row without label
+        rows.append(se_data[var])
+        row_names.append("")  # Empty label for SE rows
+    
+    # Add statistics at the end
+    rows.append(r_squared)
+    row_names.append("R-squared")
+    
+    rows.append(n_obs)
+    row_names.append("Observations")
+    
+    # Construct DataFrame
+    df = pd.DataFrame(rows, index=row_names, columns=columns)
+    
     # Split into panels if too wide
-    panels: list[pd.DataFrame] = []
+    panels = []
     for i in range(0, len(dep_vars), max_dep_vars_per_panel):
         subvars = dep_vars[i:i + max_dep_vars_per_panel]
         mask = df.columns.get_level_values(0).isin([_DEP_VAR_LABELS[d] for d in subvars])
