@@ -15,6 +15,14 @@ import pandas as pd
 import time
 import argparse
 from datetime import datetime
+try:
+    from src.data_collection import collect_raw_data
+    from src.variable_construction import construct_variables, save_constructed_data
+    from src.sample_preparation import prepare_regression_sample, save_regression_sample
+except ImportError:
+    from data_collection import collect_raw_data
+    from variable_construction import construct_variables, save_constructed_data
+    from sample_preparation import prepare_regression_sample, save_regression_sample
 
 # Add project directory to path
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -51,7 +59,7 @@ def check_data_directory():
     return data_dir
 
 
-def run_pipeline(start_year=1971, end_year=2023, force_refresh=False):
+def run_pipeline(start_year=1971, end_year=2023, force_refresh=False, skip_collection=False):
     """
     Run the full data preparation pipeline.
     
@@ -59,6 +67,7 @@ def run_pipeline(start_year=1971, end_year=2023, force_refresh=False):
         start_year (int): Start year for data collection
         end_year (int): End year for data collection
         force_refresh (bool): If True, rerun all steps even if files exist
+        skip_collection (bool): If True, skip raw data collection and use existing file
         
     Returns:
         pd.DataFrame: Final regression sample
@@ -73,20 +82,53 @@ def run_pipeline(start_year=1971, end_year=2023, force_refresh=False):
     # Check data directory
     data_dir = check_data_directory()
     
-    # Step 1: Data Collection
-    raw_data_path = os.path.join(data_dir, 'raw_merged_data.csv')
-    if os.path.exists(raw_data_path) and not force_refresh:
-        print(f"Raw data file found at {raw_data_path}")
-        print("Loading existing raw data...")
-        raw_data = pd.read_csv(raw_data_path)
-        print(f"Loaded {len(raw_data)} observations from raw data file")
-    else:
-        print("Collecting raw data from WRDS...")
-        raw_data = collect_raw_data(start_year, end_year)
-        if raw_data is None:
-            print("Failed to collect raw data. Exiting pipeline.")
+    # Step 1: Data Collection / Loading
+    raw_data_parquet_path = os.path.join(data_dir, 'raw_merged_data.parquet')
+    raw_data_csv_path = os.path.join(data_dir, 'raw_merged_data.csv')
+    raw_data = None
+
+    if skip_collection:
+        print("Skipping data collection step as per --skip_collection flag.")
+        if os.path.exists(raw_data_parquet_path):
+            print(f"Loading existing raw data from {raw_data_parquet_path}...")
+            raw_data = pd.read_parquet(raw_data_parquet_path)
+            print(f"Loaded {len(raw_data)} observations from Parquet file.")
+        elif os.path.exists(raw_data_csv_path):
+            print(f"Parquet file not found. Loading existing raw data from {raw_data_csv_path}...")
+            raw_data = pd.read_csv(raw_data_csv_path)
+            print(f"Loaded {len(raw_data)} observations from CSV file.")
+        else:
+            print(f"Error: --skip_collection specified, but no raw data file found at {raw_data_parquet_path} or {raw_data_csv_path}.")
+            print("Please ensure one of these files exists in the 'data' directory or run without --skip_collection.")
             return None
-    
+    else:
+        # Original logic: try to load CSV if not force_refresh, otherwise collect.
+        # The project seems to be moving towards Parquet, so eventually collect_raw_data should save to Parquet.
+        # For now, matching existing behavior for the collection path.
+        if os.path.exists(raw_data_csv_path) and not force_refresh:
+            print(f"Raw data file found at {raw_data_csv_path}")
+            print("Loading existing raw data...")
+            raw_data = pd.read_csv(raw_data_csv_path)
+            print(f"Loaded {len(raw_data)} observations from raw data file")
+        else:
+            if force_refresh and os.path.exists(raw_data_csv_path):
+                print(f"Force refresh is True. Will re-collect raw data, ignoring existing {raw_data_csv_path}.")
+            elif force_refresh and os.path.exists(raw_data_parquet_path):
+                 print(f"Force refresh is True. Will re-collect raw data, ignoring existing {raw_data_parquet_path}.")
+            print("Collecting raw data from WRDS...")
+            # collect_raw_data is imported in main() before run_pipeline is called
+            raw_data = collect_raw_data(start_year, end_year)
+            if raw_data is None:
+                print("Failed to collect raw data. Exiting pipeline.")
+                return None
+            # Assuming collect_raw_data saves its output if it runs, e.g. as raw_merged_data.csv or .parquet
+            # For now, the script implies it saves to CSV if it collects new data.
+            # Consider standardizing collect_raw_data to save to parquet and then this logic can simplify.
+
+    if raw_data is None: # Should have been caught earlier if skip_collection failed, but as a safeguard.
+        print("Raw data is not available. Exiting pipeline.")
+        return None
+
     print("-" * 80)
     step1_time = time.time()
     print(f"Step 1 (Data Collection) completed in {(step1_time - start_time) / 60:.2f} minutes")
@@ -179,7 +221,7 @@ def run_analysis(data_path=None, output_dir=None):
         'gvkey', 'datadate', 'fyear', 'at', 'lct', 'dlc', 'ibc', 'xidoc', 'dpc', 
         'txdc', 'esubc', 'sppiv', 'fopo', 'capx', 'aqc', 'ivch', 'siv', 'ppent',
         'che', 'act', 'dltt', 'lt', 'ceq', 'pstk', 're', 'dvc', 'dvp', 'sale',
-        'exchg', 'prc', 'shrout', 'sic', 'permno'
+        'exchg', 'prc', 'shrout', 'sic', 'permno', 'oiadp', 'oancf', 'ni','ret'
     ]
     
     # Filter to only use available columns
@@ -275,31 +317,36 @@ def main():
         description='Run Lewellen and Lewellen (2016) replication study'
     )
     parser.add_argument(
-        '--start_year', 
+        '--start-year', 
         type=int, 
         default=1971,
         help='Start year for data collection (default: 1971)'
     )
     parser.add_argument(
-        '--end_year', 
+        '--end-year', 
         type=int, 
         default=2023,
         help='End year for data collection (default: 2023)'
     )
     parser.add_argument(
-        '--force_refresh', 
+        '--force-refresh', 
         action='store_true',
         help='Force refresh of all data files even if they exist'
     )
     parser.add_argument(
-        '--run_analysis', 
+        '--run-analysis', 
         action='store_true',
         help='Run analysis after preparing the data'
     )
     parser.add_argument(
-        '--analysis_only', 
+        '--analysis-only', 
         action='store_true',
-        help='Skip data preparation and only run analysis'
+        help='Skip data preparation and only run analysis. Assumes raw_merged_data.parquet exists.'
+    )
+    parser.add_argument(
+        '--skip-collection',
+        action='store_true',
+        help='Skip raw data collection. Assumes raw_merged_data.parquet (or .csv) exists and proceeds with variable construction and sample prep.'
     )
     
     args = parser.parse_args()
@@ -319,7 +366,8 @@ def main():
     regression_data = run_pipeline(
         start_year=args.start_year,
         end_year=args.end_year,
-        force_refresh=args.force_refresh
+        force_refresh=args.force_refresh,
+        skip_collection=args.skip_collection
     )
     
     # Run analysis if requested

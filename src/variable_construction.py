@@ -38,6 +38,33 @@ def calculate_net_assets(data):
     return data
 
 
+def calculate_income_variables(data):
+    """
+    Calculate various income variables required for the paper.
+    
+    Args:
+        data (pd.DataFrame): Input data frame
+        
+    Returns:
+        pd.DataFrame: Data with income variables added
+    """
+    # Operating Income (OP_PROF) - oiadp in Compustat
+    data['op_prof'] = data['oiadp']
+    
+    # Income before extraordinary items (PROF) - ib in Compustat
+    inc_col = 'ib' if 'ib' in data.columns else 'ibc'
+    data['prof'] = data[inc_col]
+    
+    # Net income (NI) - ni in Compustat
+    data['ni'] = data['ni']
+    
+    # Depreciation (DEPR) - dp in Compustat
+    dep_col = 'dp' if 'dp' in data.columns else 'dpc'
+    data['depr'] = data[dep_col]
+    
+    return data
+
+
 def calculate_cash_flow(data):
     """
     Calculate cash flow using Statement of Cash Flows approach.
@@ -59,9 +86,11 @@ def calculate_cash_flow(data):
         if col not in data.columns:
             data[col] = 0.0
 
-    # If Compustat provides OANCF, use it directly (it already equals PROF+DEPR+OTHCF)
+    # Calculate other cash flows (OTHCF)
+    # If Compustat provides OANCF, compute OTHCF as the residual
     if 'oancf' in data.columns:
         data['cash_flow'] = data['oancf']
+        data['othcf'] = data['oancf'] - (data[inc_col].fillna(0) + data[dep_col].fillna(0))
     else:
         # Otherwise reconstruct using other components available (close to paper definition)
         cf_components = ['xidoc', 'txdc', 'esubc', 'sppiv', 'fopo']
@@ -70,8 +99,9 @@ def calculate_cash_flow(data):
                 data[col] = 0.0
             data[col] = data[col].fillna(0)
 
-        data['cash_flow'] = (data[inc_col].fillna(0) + data[dep_col].fillna(0) +
-                             data['xidoc'] + data['txdc'] + data['esubc'] + data['sppiv'] + data['fopo'])
+        # Define OTHCF as the sum of these components
+        data['othcf'] = data['xidoc'] + data['txdc'] + data['esubc'] + data['sppiv'] + data['fopo']
+        data['cash_flow'] = data[inc_col].fillna(0) + data[dep_col].fillna(0) + data['othcf']
 
     # Traditional measure: PROF + DEPR (ib + dp)
     data['trad_cash_flow'] = data[inc_col] + data[dep_col]
@@ -79,9 +109,47 @@ def calculate_cash_flow(data):
     return data
 
 
+def calculate_balance_sheet_items(data):
+    """
+    Calculate balance sheet items required for the paper.
+    
+    Args:
+        data (pd.DataFrame): Input data frame
+        
+    Returns:
+        pd.DataFrame: Data with balance sheet items added
+    """
+    # Sort data for lag calculations
+    data = data.sort_values(['gvkey', 'datadate'])
+    
+    # PLANT - Property, Plant, and Equipment (ppent in Compustat)
+    data['plant'] = data['ppent']
+    
+    # FA - Fixed Assets (ppent in Compustat)
+    data['fa'] = data['ppent']
+    
+    # NWC - Noncash net working capital ((ACT - CHE) - (LCT - DLC))
+    data['nwc'] = (data['act'] - data['che']) - (data['lct'] - data['dlc'])
+    
+    # DEBT1 - Short-term debt + Long-term debt (dlc + dltt)
+    data['debt1'] = data['dlc'] + data['dltt']
+    
+    # DEBT2 - Total nonoperating liabilities (lt - (lct - dlc))
+    data['debt2'] = data['lt'] - (data['lct'] - data['dlc'])
+    
+    # TOTEQ - Shareholders' equity (ceq + pstk)
+    data['toteq'] = data['ceq'] + data['pstk'].fillna(0)
+    
+    # Add lagged versions (useful for some calculations and referencing in the paper)
+    for var in ['plant', 'fa', 'nwc', 'debt1', 'debt2', 'toteq']:
+        data[f'{var}_lag'] = data.groupby('gvkey')[var].shift(1)
+    
+    return data
+
+
 def calculate_investment_measures(data):
     """
-    Calculate three investment measures: CAPX1, CAPX2, CAPX3.
+    Calculate investment measures: CAPX1, CAPX2, CAPX3, CAPX4.
     
     Args:
         data (pd.DataFrame): Input data frame
@@ -112,12 +180,20 @@ def calculate_investment_measures(data):
     # Calculate CAPX3
     data['capx3'] = (data['ppent'] - data['ppent_lag']).fillna(0) + data['dpc'] + data['write_downs']
     
+    # CAPX4: Total investment (CAPX3 + ΔNWC)
+    # Calculate ΔNWC if not already calculated
+    if 'delta_nwc' not in data.columns and 'nwc' in data.columns:
+        data['nwc_lag'] = data.groupby('gvkey')['nwc'].shift(1)
+        data['delta_nwc'] = data['nwc'] - data['nwc_lag']
+    
+    data['capx4'] = data['capx3'] + data['delta_nwc']
+    
     return data
 
 
 def calculate_other_cash_uses(data):
     """
-    Calculate other uses of cash flow: ΔCASH, ΔNWC, ΔDEBT, ISSUES, DIV.
+    Calculate other uses of cash flow: ΔCASH, ΔNWC, ΔDEBT, ΔDEBT2, ΔTOTEQ, ISSUES, DIV, ΔNA.
     
     Args:
         data (pd.DataFrame): Input data frame
@@ -134,8 +210,9 @@ def calculate_other_cash_uses(data):
     
     # 2. Change in Net Working Capital (ΔNWC)
     # NWC = (ACT - CHE) - (LCT - DLC)
-    data['nwc'] = (data['act'] - data['che']) - (data['lct'] - data['dlc'])
-    data['nwc_lag'] = data.groupby('gvkey')['nwc'].shift(1)
+    if 'nwc' not in data.columns:
+        data['nwc'] = (data['act'] - data['che']) - (data['lct'] - data['dlc'])
+        data['nwc_lag'] = data.groupby('gvkey')['nwc'].shift(1)
     data['delta_nwc'] = data['nwc'] - data['nwc_lag']
     
     # 3. Change in Debt (ΔDEBT)
@@ -145,7 +222,23 @@ def calculate_other_cash_uses(data):
     data['txdc_lag'] = data.groupby('gvkey')['txdc'].shift(1)
     data['delta_debt'] = (data['debt'] - data['debt_lag']) - (data['txdc'] - data['txdc_lag'].fillna(0))
     
-    # 4. Equity Issuance (ISSUES)
+    # 4. Change in DEBT2 (ΔDEBT2)
+    if 'debt2' not in data.columns:
+        data['debt2'] = data['lt'] - (data['lct'] - data['dlc'])
+        data['debt2_lag'] = data.groupby('gvkey')['debt2'].shift(1)
+    data['delta_debt2'] = data['debt2'] - data['debt2_lag']
+    
+    # 5. Change in TOTEQ (ΔTOTEQ)
+    if 'toteq' not in data.columns:
+        data['toteq'] = data['ceq'] + data['pstk'].fillna(0)
+        data['toteq_lag'] = data.groupby('gvkey')['toteq'].shift(1)
+    data['delta_toteq'] = data['toteq'] - data['toteq_lag']
+    
+    # 6. Change in Net Assets (ΔNA)
+    data['net_assets_lag'] = data.groupby('gvkey')['net_assets'].shift(1)
+    data['delta_na'] = data['net_assets'] - data['net_assets_lag']
+    
+    # 7. Equity Issuance (ISSUES)
     # ISSUES = (ΔCEQ + ΔPSTK) - ΔRE
     data['ceq_lag'] = data.groupby('gvkey')['ceq'].shift(1)
     data['pstk_lag'] = data.groupby('gvkey')['pstk'].shift(1)
@@ -154,8 +247,12 @@ def calculate_other_cash_uses(data):
     data['issues'] = ((data['ceq'] - data['ceq_lag']) + 
                      (data['pstk'].fillna(0) - data['pstk_lag'].fillna(0))) - (data['re'] - data['re_lag'])
     
-    # 5. Dividends (DIV)
+    # 8. Dividends (DIV)
     data['div'] = data['dvc'].fillna(0) + data['dvp'].fillna(0)
+    
+    # 9. Internal Equity (INTEQ = NI - DIV)
+    if 'ni' in data.columns:
+        data['inteq'] = data['ni'] - data['div']
     
     return data
 
@@ -187,32 +284,48 @@ def calculate_market_to_book(data):
 
 def calculate_returns(data):
     """
-    Calculate lagged annual stock returns for use as instruments.
+    Calculate stock returns for the paper.
     
     Args:
-        data (pd.DataFrame): Input data frame with monthly returns
+        data (pd.DataFrame): Input data frame with returns
         
     Returns:
-        pd.DataFrame: Data with annual returns for past 4 years
+        pd.DataFrame: Data with annual stock returns
     """
-    # First ensure we're working with a panel sorted by gvkey and date
-    data = data.sort_values(['gvkey', 'datadate'])
+    # Annual stock return (RETURN)
+    # If 'ret' is monthly, we need to compound it to get annual
+    # For now, we'll assume 'ret' is already the annual return
+    data['return'] = data['ret']
     
-    # Convert monthly returns to annual returns for the past 4 years
+    # Calculate lagged annual returns for the past 4 years
+    data = data.sort_values(['gvkey', 'datadate'])
     for lag in range(1, 5):
         lag_col = f'ret_{lag}'
-        data[lag_col] = np.nan
+        data[lag_col] = data.groupby('gvkey')['return'].shift(lag)
+    
+    return data
+
+
+def calculate_sales(data):
+    """
+    Add sales/revenue variable.
+    
+    Args:
+        data (pd.DataFrame): Input data frame
         
-        # For each firm-year, we need the annual return ending in the previous fiscal year
-        # Since our data is already at the fiscal year-end, we need to look back 12*lag months
-        # This is a simplified approach - in practice, would need to compound monthly returns
-        
+    Returns:
+        pd.DataFrame: Data with sales variable added
+    """
+    # SALES - Revenues (sale in Compustat)
+    data['sales'] = data['sale']
+    
     return data
 
 
 def scale_variables(data):
     """
     Scale all flow variables by average net assets for the year.
+    Level variables are scaled by ending net assets.
     
     Args:
         data (pd.DataFrame): Input data frame
@@ -239,16 +352,20 @@ def scale_variables(data):
         print("Warning: Missing gvkey or datadate columns for proper scaling.")
         result['avg_net_assets'] = result['net_assets']
     
-    # List of variables to scale
-    scale_vars = [
-        'cash_flow', 'trad_cash_flow', 'capx1', 'capx2', 'capx3',
-        'delta_cash', 'delta_nwc', 'delta_debt', 'issues', 'div'
+    # List of flow variables to scale by average net assets
+    flow_vars = [
+        'cash_flow', 'trad_cash_flow', 'op_prof', 'prof', 'ni', 'depr', 'othcf',
+        'capx1', 'capx2', 'capx3', 'capx4', 'inteq',
+        'delta_cash', 'delta_nwc', 'delta_debt', 'delta_debt2', 'delta_toteq', 'delta_na',
+        'issues', 'div', 'sales'
     ]
     
-    # Scale variables
-    for var in scale_vars:
+    # Scale flow variables by average net assets
+    for var in flow_vars:
         if var in result.columns:
             result[f'{var}_scaled'] = result[var] / result['avg_net_assets']
+    
+    # No need to scale 'return' as it's already a percentage
     
     return result
 
@@ -264,9 +381,12 @@ def prepare_financial_constraint_measures(data):
         pd.DataFrame: Data with constraint-related variables
     """
     # Calculate free cash flow measures
-    data['fcf1'] = data['cash_flow_scaled'] - data['capx1_scaled']
-    data['fcf2'] = data['cash_flow_scaled'] - data['capx2_scaled']
-    data['fcf3'] = data['cash_flow_scaled'] - data['capx3_scaled']
+    data['fcf1_scaled'] = data['cash_flow_scaled'] - data['capx1_scaled']
+    data['fcf3_scaled'] = data['cash_flow_scaled'] - data['capx3_scaled']
+    
+    # Add FCF4 (CF - CAPX4)
+    if 'capx4_scaled' in data.columns:
+        data['fcf4_scaled'] = data['cash_flow_scaled'] - data['capx4_scaled']
     
     # Calculate additional ratios for constraint classification
     data['cash_to_assets'] = data['che'] / data['net_assets']
@@ -310,33 +430,46 @@ def construct_variables(data, winsorize_limits=(0.01, 0.01)):
     # Step 1: Calculate Net Assets
     result = calculate_net_assets(result)
     
-    # Step 2: Calculate Cash Flow
+    # Step 2: Calculate Income Variables
+    result = calculate_income_variables(result)
+    
+    # Step 3: Calculate Cash Flow
     result = calculate_cash_flow(result)
     
-    # Step 3: Calculate Investment Measures
+    # Step 4: Calculate Balance Sheet Items
+    result = calculate_balance_sheet_items(result)
+    
+    # Step 5: Calculate Investment Measures
     result = calculate_investment_measures(result)
     
-    # Step 4: Calculate Other Uses of Cash Flow
+    # Step 6: Calculate Other Uses of Cash Flow
     result = calculate_other_cash_uses(result)
     
-    # Step 5: Calculate Market-to-Book Ratio
+    # Step 7: Calculate Market-to-Book Ratio
     result = calculate_market_to_book(result)
     
-    # Step 6: Calculate Returns
+    # Step 8: Calculate Sales/Revenues
+    result = calculate_sales(result)
+    
+    # Step 9: Calculate Returns
     result = calculate_returns(result)
     
-    # Step 7: Scale Variables
+    # Step 10: Scale Variables
     result = scale_variables(result)
     
-    # Step 8: Prepare Financial Constraint Measures
+    # Step 11: Prepare Financial Constraint Measures
     result = prepare_financial_constraint_measures(result)
     
     # Check availability of variables to winsorize
     vars_to_winsorize = [
+        'op_prof_scaled', 'prof_scaled', 'ni_scaled', 'depr_scaled', 'othcf_scaled',
         'cash_flow_scaled', 'trad_cash_flow_scaled', 
-        'capx1_scaled', 'capx2_scaled', 'capx3_scaled',
+        'capx1_scaled', 'capx2_scaled', 'capx3_scaled', 'capx4_scaled',
         'delta_cash_scaled', 'delta_nwc_scaled', 'delta_debt_scaled', 
-        'issues_scaled', 'div_scaled', 'mb', 'mb_lag'
+        'delta_debt2_scaled', 'delta_toteq_scaled', 'delta_na_scaled',
+        'issues_scaled', 'div_scaled', 'inteq_scaled', 'sales_scaled',
+        'return', 'mb', 'mb_lag',
+        'fcf1_scaled'
     ]
     
     # Filter the list to only include variables that exist in the data

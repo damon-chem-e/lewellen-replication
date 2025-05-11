@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+import gc # Import garbage collector
 
 # Add the project directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -482,16 +483,19 @@ def compare_with_original_paper(data, tables_dir):
     print("\n=== Comparison with Original Paper ===")
     
     # Create subsamples
-    constrained = data[data['constrained'] == 1]
-    unconstrained = data[data['unconstrained'] == 1]
+    # Make copies to ensure original data is not modified by downstream regressions if they alter data in place
+    # and to allow explicit deletion later.
+    data_full_sample = data.copy()
+    constrained_sample = data[data['constrained'] == 1].copy() if 'constrained' in data and (data['constrained'] == 1).any() else pd.DataFrame()
+    unconstrained_sample = data[data['unconstrained'] == 1].copy() if 'unconstrained' in data and (data['unconstrained'] == 1).any() else pd.DataFrame()
     
     # Check if we have both constraint groups
-    has_constrained = len(constrained) > 0
-    has_unconstrained = len(unconstrained) > 0
+    has_constrained = not constrained_sample.empty
+    has_unconstrained = not unconstrained_sample.empty
     
-    print(f"Full sample size: {len(data)} observations")
-    print(f"Constrained subsample: {len(constrained)} observations")
-    print(f"Unconstrained subsample: {len(unconstrained)} observations")
+    print(f"Full sample size: {len(data_full_sample)} observations")
+    print(f"Constrained subsample: {len(constrained_sample)} observations")
+    print(f"Unconstrained subsample: {len(unconstrained_sample)} observations")
     
     # Original paper values
     original_values = {
@@ -507,41 +511,66 @@ def compare_with_original_paper(data, tables_dir):
     replication_values = {}
     
     # Run OLS regressions
-    ols_results = run_ols_regression(
-        data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
+    print("Running OLS for full sample...")
+    ols_results_full = run_ols_regression(
+        data_full_sample, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
         fe_firm=True, fe_year=True
     )
-    replication_values['OLS_Full'] = ols_results.params['cash_flow_scaled']
-    
+    replication_values['OLS_Full'] = ols_results_full.params['cash_flow_scaled']
+    del ols_results_full
+    gc.collect()
+    print("OLS for full sample complete.")
+
     # Run IV regression for full sample
     instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
     
+    print("Running IV for full sample...")
     try:
-        first_stage, second_stage = run_iv_regression(
-            data, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
+        first_stage_full, second_stage_full = run_iv_regression(
+            data_full_sample, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
         )
-        replication_values['IV_Full'] = second_stage.params['cash_flow_scaled']
+        replication_values['IV_Full'] = second_stage_full.params['cash_flow_scaled']
+        del first_stage_full, second_stage_full
     except Exception as e:
         print(f"Warning: Could not run IV regression for full sample: {e}")
         replication_values['IV_Full'] = None
-    
+    finally:
+        gc.collect()
+    print("IV for full sample complete.")
+    # Delete the full sample copy as it's no longer needed for these specific comparisons if subsamples are used next.
+    del data_full_sample
+    gc.collect()
+
     # Run regressions for constrained firms if available
     if has_constrained:
+        print("Running OLS for constrained sample...")
         try:
-            constrained_results = run_ols_regression(
-                constrained, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
+            constrained_ols_results = run_ols_regression(
+                constrained_sample, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
                 fe_firm=True, fe_year=True
             )
-            replication_values['OLS_Constrained'] = constrained_results.params['cash_flow_scaled']
-            
+            replication_values['OLS_Constrained'] = constrained_ols_results.params['cash_flow_scaled']
+            del constrained_ols_results
+        except Exception as e:
+            print(f"Warning: Could not run OLS for constrained firms: {e}")
+            replication_values['OLS_Constrained'] = None
+        finally:
+            gc.collect()
+        print("OLS for constrained sample complete.")
+        
+        print("Running IV for constrained sample...")
+        try:
             first_stage_c, second_stage_c = run_iv_regression(
-                constrained, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
+                constrained_sample, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
             )
             replication_values['IV_Constrained'] = second_stage_c.params['cash_flow_scaled']
+            del first_stage_c, second_stage_c
         except Exception as e:
-            print(f"Warning: Could not run regressions for constrained firms: {e}")
-            replication_values['OLS_Constrained'] = None
+            print(f"Warning: Could not run IV regression for constrained firms: {e}")
             replication_values['IV_Constrained'] = None
+        finally:
+            gc.collect()
+        print("IV for constrained sample complete.")
     else:
         print("No constrained firms in sample, skipping constrained regressions")
         replication_values['OLS_Constrained'] = None
@@ -549,21 +578,34 @@ def compare_with_original_paper(data, tables_dir):
     
     # Run regressions for unconstrained firms if available
     if has_unconstrained:
+        print("Running OLS for unconstrained sample...")
         try:
-            unconstrained_results = run_ols_regression(
-                unconstrained, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
+            unconstrained_ols_results = run_ols_regression(
+                unconstrained_sample, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
                 fe_firm=True, fe_year=True
             )
-            replication_values['OLS_Unconstrained'] = unconstrained_results.params['cash_flow_scaled']
-            
+            replication_values['OLS_Unconstrained'] = unconstrained_ols_results.params['cash_flow_scaled']
+            del unconstrained_ols_results
+        except Exception as e:
+            print(f"Warning: Could not run OLS for unconstrained firms: {e}")
+            replication_values['OLS_Unconstrained'] = None
+        finally:
+            gc.collect()
+        print("OLS for unconstrained sample complete.")
+        
+        print("Running IV for unconstrained sample...")
+        try:
             first_stage_u, second_stage_u = run_iv_regression(
-                unconstrained, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
+                unconstrained_sample, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
             )
             replication_values['IV_Unconstrained'] = second_stage_u.params['cash_flow_scaled']
+            del first_stage_u, second_stage_u
         except Exception as e:
-            print(f"Warning: Could not run regressions for unconstrained firms: {e}")
-            replication_values['OLS_Unconstrained'] = None
+            print(f"Warning: Could not run IV regression for unconstrained firms: {e}")
             replication_values['IV_Unconstrained'] = None
+        finally:
+            gc.collect()
+        print("IV for unconstrained sample complete.")
     else:
         print("No unconstrained firms in sample, skipping unconstrained regressions")
         replication_values['OLS_Unconstrained'] = None
@@ -630,6 +672,12 @@ def compare_with_original_paper(data, tables_dir):
     plt.close()
     
     print("Comparison with original paper saved.")
+    # Clean up subsample DataFrames if they were created
+    if has_constrained:
+        del constrained_sample
+    if has_unconstrained:
+        del unconstrained_sample
+    gc.collect()
 
 
 def run_full_regression_analysis(data, tables_dir, plots_dir):
