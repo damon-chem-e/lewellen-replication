@@ -62,6 +62,11 @@ def generate_paper_table1():
     
     print("Generating Paper-Style Table 1: Descriptive Statistics")
     
+    # Print available columns for debugging
+    print("Available columns in sample DataFrame:")
+    for col in sorted(sample.columns):
+        print(f"  - {col}")
+    
     # Calculate end year for title
     end_year = int(sample['fyear'].max())
     
@@ -77,7 +82,7 @@ def generate_paper_table1():
         'trad_cash_flow_scaled': {'name': 'PROF+DEPR', 'desc': 'Income before extraordinary items + Depreciation'},
 
         # Balance-sheet items
-        'cash_lag':              {'name': 'CASH',      'desc': 'Cash holdings'},
+        'che_lag':               {'name': 'CASH',      'desc': 'Cash holdings'},
         'nwc_lag':               {'name': 'NWC',       'desc': 'Noncash net working capital'},
         'plant_lag':             {'name': 'PLANT',     'desc': 'Property, plant, and equipment'},
         'fa_lag':                {'name': 'FA',        'desc': 'Fixed assets'},
@@ -103,9 +108,9 @@ def generate_paper_table1():
         'inteq_scaled':          {'name': 'INTEQ',     'desc': 'Internal equity (NI-DIV)'},
 
         # Free cash-flow
-        'fcf1':                  {'name': 'FCF1',      'desc': 'CF - CAPX1'},
-        'fcf3':                  {'name': 'FCF3',      'desc': 'CF - CAPX3'},
-        'fcf4':                  {'name': 'FCF4',      'desc': 'CF - CAPX4'},
+        'fcf1_scaled':           {'name': 'FCF1',      'desc': 'CF - CAPX1'},
+        'fcf3_scaled':           {'name': 'FCF3',      'desc': 'CF - CAPX3'},
+        'fcf4_scaled':           {'name': 'FCF4',      'desc': 'CF - CAPX4'},
 
         # Other measures
         'sales_scaled':          {'name': 'SALES',     'desc': 'Revenues'},
@@ -114,12 +119,12 @@ def generate_paper_table1():
     }
     
     # Calculate additional variables if they don't exist
-    if 'fcf1' not in sample.columns:
-        sample['fcf1'] = sample['cash_flow_scaled'] - sample['capx1_scaled']
-    if 'fcf3' not in sample.columns:
-        sample['fcf3'] = sample['cash_flow_scaled'] - sample['capx3_scaled']
-    if 'fcf4' not in sample.columns and 'capx4_scaled' in sample.columns:
-        sample['fcf4'] = sample['cash_flow_scaled'] - sample['capx4_scaled']
+    if 'fcf1_scaled' not in sample.columns:
+        sample['fcf1_scaled'] = sample['cash_flow_scaled'] - sample['capx1_scaled']
+    if 'fcf3_scaled' not in sample.columns:
+        sample['fcf3_scaled'] = sample['cash_flow_scaled'] - sample['capx3_scaled']
+    if 'fcf4_scaled' not in sample.columns and 'capx4_scaled' in sample.columns:
+        sample['fcf4_scaled'] = sample['cash_flow_scaled'] - sample['capx4_scaled']
     if 'inteq_scaled' not in sample.columns and 'ni_scaled' in sample.columns and 'div_scaled' in sample.columns:
         sample['inteq_scaled'] = sample['ni_scaled'] - sample['div_scaled']
     
@@ -157,7 +162,7 @@ def generate_paper_table1():
                 'N': int(round(n))
             })
         else:
-            print(f"Warning: Variable '{var}' not found in the dataset. Check variable construction.")
+            print(f"Warning: Variable '{var}' not found in the dataset. Skipping this variable.")
     
     # Create DataFrame with statistics
     stats_df = pd.DataFrame(stats_data)
@@ -248,29 +253,150 @@ def generate_paper_table1():
         .description {{
             text-align: justify;
             margin: 20px auto;
-            width: 90%;
-            font-size: 14px;
+            width: 80%;
+            font-size: 0.9em;
         }}
         </style>
     </head>
     <body>
         <h1>TABLE 1</h1>
         <h2>Descriptive Statistics (1971–{end_year})</h2>
+        
         <div class="description">
             {description}
         </div>
-        {stats_df.to_html(index=False, border=1, classes='table')}
+        
+        <table>
+            <tr>
+                <th>Variable</th>
+                <th>Description</th>
+                <th>Mean</th>
+                <th>Median</th>
+                <th>Std</th>
+                <th>Min</th>
+                <th>Max</th>
+                <th>N</th>
+            </tr>
+    """
+    
+    for _, row in stats_df.iterrows():
+        # Replace Greek delta with HTML entity
+        var_name = row['Variable'].replace('Δ', '&Delta;')
+        
+        html_content += f"""
+            <tr>
+                <td>{var_name}</td>
+                <td>{row['Description']}</td>
+                <td>{row['Mean']:.3f}</td>
+                <td>{row['Median']:.3f}</td>
+                <td>{row['Std']:.3f}</td>
+                <td>{row['Min']:.3f}</td>
+                <td>{row['Max']:.3f}</td>
+                <td>{row['N']}</td>
+            </tr>
+        """
+    
+    html_content += """
+        </table>
     </body>
     </html>
     """
     
-    with open(os.path.join(tables_dir, 'paper_table1_descriptive_statistics.html'), 'w') as f:
+    with open(os.path.join(tables_dir, 'paper_table1.html'), 'w', encoding='utf-8') as f:
         f.write(html_content)
     
-    print(f"Paper-style Table 1 saved to {table_path}")
-    print(f"HTML version saved to {os.path.join(tables_dir, 'paper_table1_descriptive_statistics.html')}")
+    # Create LaTeX version in professional directory
+    generate_latex_paper_table1(tables_dir, stats_df, end_year, description)
     
+    print(f"Paper Table 1 saved to {tables_dir}")
     return sample
+
+def generate_latex_paper_table1(tables_dir, stats_df, end_year, description):
+    """
+    Generate LaTeX version of the paper's Table 1 with professional formatting.
+    
+    Parameters
+    ----------
+    tables_dir : str
+        Directory path where tables are stored
+    stats_df : pandas.DataFrame
+        DataFrame containing the statistics for the table
+    end_year : int
+        End year for the table title
+    description : str
+        Description text for the table
+    """
+    professional_dir = os.path.join(tables_dir, 'professional')
+    os.makedirs(professional_dir, exist_ok=True)
+    
+    latex_file = os.path.join(professional_dir, 'paper_table1.tex')
+    
+    # Start LaTeX document
+    latex_content = [
+        "\\documentclass[12pt]{article}",
+        "\\usepackage[utf8]{inputenc}",
+        "\\usepackage{booktabs}",
+        "\\usepackage{array}",
+        "\\usepackage{caption}",
+        "\\usepackage{float}",
+        "\\usepackage{geometry}",
+        "\\usepackage{siunitx}",
+        "\\usepackage{multirow}",
+        "\\usepackage{amsmath}",
+        "\\usepackage[table]{xcolor}",
+        "\\usepackage{threeparttable}",
+        "",
+        "\\geometry{margin=1in}",
+        "",
+        "\\begin{document}",
+        "",
+        "\\begin{table}[htbp]",
+        "\\centering",
+        "\\caption{Descriptive Statistics (1971--" + str(end_year) + ")}",
+        "\\label{tab:paper_table1}",
+        "",
+        "\\begin{threeparttable}",
+        "\\begin{tabular}{l p{5cm} *{6}{S[table-format=1.3]}}",
+        "\\toprule",
+        "{Variable} & {Description} & {Mean} & {Median} & {Std} & {Min} & {Max} & {N} \\\\",
+        "\\midrule"
+    ]
+    
+    # Add data rows
+    for _, row in stats_df.iterrows():
+        # Replace potentially problematic characters in variable names
+        var_name = row['Variable']
+        var_name = var_name.replace('Δ', '$\\Delta$')
+        
+        # Format N as integer
+        n_value = f"{int(row['N'])}" if not pd.isna(row['N']) else "{--}"
+        
+        # Add LaTeX row
+        latex_content.append(
+            f"{var_name} & {row['Description']} & "
+            f"{row['Mean']:.3f} & {row['Median']:.3f} & {row['Std']:.3f} & "
+            f"{row['Min']:.3f} & {row['Max']:.3f} & {n_value} \\\\"
+        )
+    
+    latex_content.extend([
+        "\\bottomrule",
+        "\\end{tabular}",
+        "",
+        "\\begin{tablenotes}[flushleft]",
+        "\\small",
+        "\\item \\textit{Notes:} " + description,
+        "\\end{tablenotes}",
+        "\\end{threeparttable}",
+        "\\end{table}",
+        "",
+        "\\end{document}"
+    ])
+    
+    # Write to file with UTF-8 encoding
+    with open(latex_file, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(latex_content))
+    
+    print(f"LaTeX Paper Table 1 saved to {latex_file}")
 
 if __name__ == "__main__":
     generate_paper_table1()

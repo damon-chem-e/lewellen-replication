@@ -147,8 +147,158 @@ def generate_table1():
         
         f.write("</body></html>")
     
+    # Create LaTeX version in professional directory
+    generate_latex_table1(tables_dir, panel_a, panel_b, panel_c)
+    
     print(f"Table 1 saved to {tables_dir}")
     return regression_sample
+
+def generate_latex_table1(tables_dir, panel_a, panel_b, panel_c):
+    """
+    Generate LaTeX version of Table 1 with professional formatting.
+    
+    Parameters
+    ----------
+    tables_dir : str
+        Directory path where tables are stored
+    panel_a : pandas.DataFrame
+        Panel A data (sample characteristics by year)
+    panel_b : pandas.DataFrame
+        Panel B data (summary statistics)
+    panel_c : pandas.DataFrame
+        Panel C data (correlation matrix)
+    """
+    professional_dir = os.path.join(tables_dir, 'professional')
+    os.makedirs(professional_dir, exist_ok=True)
+    
+    latex_file = os.path.join(professional_dir, 'table1.tex')
+    
+    # Start LaTeX document
+    latex_content = [
+        "\\documentclass[12pt]{article}",
+        "\\usepackage{booktabs}",
+        "\\usepackage{array}",
+        "\\usepackage{caption}",
+        "\\usepackage{float}",
+        "\\usepackage{geometry}",
+        "\\usepackage{siunitx}",
+        "\\usepackage{lscape}",
+        "\\usepackage{pdflscape}",
+        "",
+        "\\geometry{margin=1in}",
+        "",
+        "\\begin{document}",
+        "",
+        "\\begin{table}[htbp]",
+        "\\centering",
+        "\\caption{Sample Characteristics and Summary Statistics}",
+        "\\label{tab:table1}",
+        "",
+        "\\vspace{0.5cm}",
+        ""
+    ]
+    
+    # Panel A: Sample characteristics by year
+    latex_content.extend([
+        "\\begin{minipage}{\\textwidth}",
+        "\\textbf{Panel A: Sample Characteristics by Year}",
+        "\\vspace{0.3cm}",
+        "",
+        "\\begin{tabular}{l S[table-format=4.0] S[table-format=6.0] S[table-format=4.0] S[table-format=3.0] S[table-format=5.0] S[table-format=3.0] S[table-format=2.0]}",
+        "\\toprule",
+        "{Year} & {Number of Firms} & {Total Assets (\\$M)} & {Average Assets (\\$M)} & {Median Assets (\\$M)} & {Total CAPX (\\$M)} & {Average CAPX (\\$M)} & {Median CAPX (\\$M)} \\\\",
+        "\\midrule"
+    ])
+    
+    # Add Panel A data rows
+    for year, row in panel_a.iterrows():
+        latex_content.append(f"{year} & {row['Number of Firms']:.0f} & {row['Total Assets ($M)']:.0f} & {row['Average Assets ($M)']:.0f} & {row['Median Assets ($M)']:.0f} & {row['Total CAPX ($M)']:.0f} & {row['Average CAPX ($M)']:.0f} & {row['Median CAPX ($M)']:.0f} \\\\")
+    
+    latex_content.extend([
+        "\\bottomrule",
+        "\\end{tabular}",
+        "\\end{minipage}",
+        "",
+        "\\vspace{1cm}",
+        ""
+    ])
+    
+    # Panel B: Summary statistics for key variables
+    latex_content.extend([
+        "\\begin{minipage}{\\textwidth}",
+        "\\textbf{Panel B: Summary Statistics for Key Variables}",
+        "\\vspace{0.3cm}",
+        "",
+        "\\begin{tabular}{l S[table-format=1.3] S[table-format=1.3] S[table-format=1.3] S[table-format=1.3] S[table-format=1.3] S[table-format=1.3] S[table-format=1.3]}",
+        "\\toprule",
+        "{Variable} & {Mean} & {Median} & {Std Dev} & {Min} & {P25} & {P75} & {Max} \\\\",
+        "\\midrule"
+    ])
+    
+    # Add Panel B data rows
+    for var, row in panel_b.iterrows():
+        latex_content.append(f"{var} & {row['Mean']:.3f} & {row['Median']:.3f} & {row['Std Dev']:.3f} & {row['Min']:.3f} & {row['P25']:.3f} & {row['P75']:.3f} & {row['Max']:.3f} \\\\")
+    
+    latex_content.extend([
+        "\\bottomrule",
+        "\\end{tabular}",
+        "\\end{minipage}",
+        "",
+        "\\vspace{1cm}",
+        ""
+    ])
+    
+    # Panel C: Correlation matrix
+    latex_content.extend([
+        "\\begin{minipage}{\\textwidth}",
+        "\\textbf{Panel C: Correlation Matrix}",
+        "\\vspace{0.3cm}",
+        "",
+        "\\begin{tabular}{l *{12}{c}}",
+        "\\toprule",
+        "{} & {CF} & {CAPX1} & {CAPX2} & {CAPX3} & {$\\Delta$Cash} & {$\\Delta$NWC} & {$\\Delta$Debt} & {Issues} & {Div} & {M/B} & {Cash$_{t-1}$} & {Debt$_{t-1}$} \\\\",
+        "\\midrule"
+    ])
+    
+    # Short names for columns (used in correlation matrix)
+    short_names = [
+        "CF", "CAPX1", "CAPX2", "CAPX3", "$\\Delta$Cash", "$\\Delta$NWC", 
+        "$\\Delta$Debt", "Issues", "Div", "M/B", "Cash$_{t-1}$", "Debt$_{t-1}$"
+    ]
+    
+    # Add Panel C data rows
+    for i, var in enumerate(panel_c.index):
+        row_values = []
+        for j in range(len(short_names)):
+            if i == j:
+                val = "1.00"
+            else:
+                val = f"{panel_c.iloc[i, j]:.2f}"
+            row_values.append(val)
+        
+        latex_content.append(f"{var} & {' & '.join(row_values)} \\\\")
+    
+    latex_content.extend([
+        "\\bottomrule",
+        "\\end{tabular}",
+        "\\end{minipage}",
+        "",
+        "\\begin{minipage}{\\textwidth}",
+        "\\vspace{0.5cm}",
+        "\\small",
+        "\\textit{Notes:} This table presents sample characteristics and summary statistics for the firm-years in our sample. Panel A reports the number of firms and their total, average, and median assets and capital expenditures by selected years. Panel B presents summary statistics for the key variables used in our analysis. All flow variables are scaled by beginning-of-year net assets. Panel C presents the correlation matrix for these variables.",
+        "\\end{minipage}",
+        "",
+        "\\end{table}",
+        "",
+        "\\end{document}"
+    ])
+    
+    # Write to file
+    with open(latex_file, 'w') as f:
+        f.write('\n'.join(latex_content))
+    
+    print(f"LaTeX Table 1 saved to {latex_file}")
 
 if __name__ == "__main__":
     generate_table1()
