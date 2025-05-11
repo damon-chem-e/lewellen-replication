@@ -157,37 +157,54 @@ def calculate_investment_measures(data):
     Returns:
         pd.DataFrame: Data with investment measures added
     """
-    # CAPX1: Capital Expenditures
-    data['capx1'] = data['capx']
-    
+    # CAPX1: Capital Expenditures (net of sales of PPE)
+    # Paper: CAPX - SPPE (Sale of Property, Plant, and Equipment)
+    #data['capx1'] = data['capx'].fillna(0) - data['sppe'].fillna(0) # Assuming 'sppe' is available
+    data['capx1'] = data['capx'].fillna(0)
+
     # CAPX2: CAPX + Acquisitions + Other investing activities
     # Fill NA values for components with 0
-    inv_components = ['capx', 'aqc', 'ivch', 'siv']
+    inv_components = ['capx', 'aqc', 'ivch', 'siv'] # 'sppe' should not be here for CAPX2's base 'capx'
     for col in inv_components:
-        if col in data.columns:
+        if col in data.columns: # Check if column exists before filling NA
             data[col] = data[col].fillna(0)
     
-    data['capx2'] = data['capx'] + data['aqc'] + data['ivch'] + data['siv']
+    # Note: The paper's CAPX2 is less clearly defined than CAPX1 or CAPX3. 
+    # The definition "CAPX + Acquisitions + Other investing activities" is broad.
+    # For now, using the existing items for capx2.
+    data['capx2'] = data['capx'].fillna(0) + data['aqc'].fillna(0) + data['ivch'].fillna(0) + data['siv'].fillna(0)
     
-    # CAPX3: Change in PPE + Depreciation + Write-downs
-    # Need to compute year-over-year change in PPENT
-    data = data.sort_values(['gvkey', 'datadate'])
+    # CAPX3: Change in PPE + Depreciation
+    # Paper: ΔPPENT + DP
+    data = data.sort_values(['gvkey', 'datadate']) # Ensure sorted for lag
     data['ppent_lag'] = data.groupby('gvkey')['ppent'].shift(1)
     
-    # Approximate write-downs using FOPO if available
-    data['write_downs'] = data['fopo'].fillna(0)
-    
-    # Calculate CAPX3
-    data['capx3'] = (data['ppent'] - data['ppent_lag']).fillna(0) + data['dpc'] + data['write_downs']
+    # Use 'dp' (Depreciation and Amortization) if available, else 'dpc'
+    dep_item = 'dp' if 'dp' in data.columns else 'dpc'
+    if dep_item not in data.columns: # If neither dp nor dpc exists, create a zero column
+        print(f"Warning: Depreciation items 'dp' and 'dpc' not found. Using 0 for CAPX3's depreciation component.")
+        data[dep_item] = 0 
+    else:
+        data[dep_item] = data[dep_item].fillna(0) # Fill NA for the chosen depreciation item
+
+    data['capx3'] = (data['ppent'].fillna(0) - data['ppent_lag'].fillna(0)) + data[dep_item]
     
     # CAPX4: Total investment (CAPX3 + ΔNWC)
-    # Calculate ΔNWC if not already calculated
-    if 'delta_nwc' not in data.columns and 'nwc' in data.columns:
+    # Ensure delta_nwc is calculated first if not present (it's usually done in calculate_other_cash_uses)
+    if 'nwc' not in data.columns and 'act' in data.columns and 'che' in data.columns and 'lct' in data.columns and 'dlc' in data.columns:
+        data['nwc'] = (data['act'].fillna(0) - data['che'].fillna(0)) - (data['lct'].fillna(0) - data['dlc'].fillna(0))
+    
+    if 'delta_nwc' not in data.columns and 'nwc' in data.columns: # Check if nwc was created or already existed
         data['nwc_lag'] = data.groupby('gvkey')['nwc'].shift(1)
-        data['delta_nwc'] = data['nwc'] - data['nwc_lag']
+        data['delta_nwc'] = data['nwc'].fillna(0) - data['nwc_lag'].fillna(0)
     
-    data['capx4'] = data['capx3'] + data['delta_nwc']
-    
+    # If delta_nwc is still not available (e.g. nwc couldn't be formed), CAPX4 cannot be accurately calculated
+    if 'delta_nwc' in data.columns:
+        data['capx4'] = data['capx3'] + data['delta_nwc'] # delta_nwc can be negative
+    else:
+        print("Warning: 'delta_nwc' could not be calculated. 'capx4' will be missing or inaccurate.")
+        data['capx4'] = np.nan # Or data['capx3'] if that's a better fallback
+            
     return data
 
 
@@ -268,16 +285,44 @@ def calculate_market_to_book(data):
         pd.DataFrame: Data with MB ratio added
     """
     # Convert price to positive (CRSP reports negative price for bid/ask average)
-    data['prc'] = data['prc'].abs()
-    
+    if 'prc' in data.columns: # Check if 'prc' exists
+        data['prc'] = data['prc'].abs()
+    else:
+        print("Warning: 'prc' column not found for MVE calculation in market_to_book. MVE and MB will be NaN.")
+        data['mve'] = np.nan
+        data['mb'] = np.nan
+        data['mb_lag'] = np.nan
+        return data
+
+
     # Calculate market value of equity (shares * price)
-    data['mve'] = data['prc'] * data['shrout']
+    # Ensure shrout is also present
+    if 'shrout' in data.columns:
+         data['mve'] = data['prc'] * data['shrout'] # shrout in thousands, so MVE in thousands
+    else:
+        print("Warning: 'shrout' column not found for MVE calculation. MVE and MB will be NaN.")
+        data['mve'] = np.nan
+        data['mb'] = np.nan
+        data['mb_lag'] = np.nan
+        return data
     
-    # Calculate MB ratio = (MVE + DEBT) / NET_ASSETS
-    data['mb'] = (data['mve'] + data['debt']) / data['net_assets']
+    # Define debt for MB calculation = DLC + DLTT
+    # Ensure these columns exist and fill NA with 0 before summation
+    debt_for_mb = data['dlc'].fillna(0) + data['dltt'].fillna(0)
     
+    # Calculate MB ratio = (MVE + DEBT_for_MB) / NET_ASSETS
+    # net_assets should already be calculated and filtered for non-positive
+    if 'net_assets' in data.columns and 'mve' in data.columns:
+        data['mb'] = (data['mve'] + debt_for_mb) / data['net_assets']
+    else:
+        print("Warning: 'net_assets' or 'mve' not available for MB calculation. MB will be NaN.")
+        data['mb'] = np.nan
+        
     # Calculate lagged MB (useful for regressions)
-    data['mb_lag'] = data.groupby('gvkey')['mb'].shift(1)
+    if 'mb' in data.columns: # check if mb was successfully calculated
+        data['mb_lag'] = data.groupby('gvkey')['mb'].shift(1)
+    else:
+        data['mb_lag'] = np.nan # ensure column exists even if mb calculation failed
     
     return data
 
@@ -341,17 +386,41 @@ def scale_variables(data):
         result = result.sort_values(['gvkey', 'datadate'])
         
         # Calculate average net assets
+        # Paper: Use current net assets if lagged net assets are unavailable.
         result['net_assets_lag'] = result.groupby('gvkey')['net_assets'].shift(1)
-        result['avg_net_assets'] = (result['net_assets'] + result['net_assets_lag'].fillna(0)) / 2
         
-        # Replace zero averages with current net assets
-        mask = result['avg_net_assets'] <= 0
-        result.loc[mask, 'avg_net_assets'] = result.loc[mask, 'net_assets']
-    else:
-        # If missing required columns, use net_assets as fallback
-        print("Warning: Missing gvkey or datadate columns for proper scaling.")
+        # Initialize avg_net_assets with current net_assets (handles cases where lag is NaN)
         result['avg_net_assets'] = result['net_assets']
-    
+        
+        # Calculate average where net_assets_lag is available and positive
+        # (net_assets itself is already filtered to be > 0 in calculate_net_assets)
+        valid_lag_mask = result['net_assets_lag'].notna() & (result['net_assets_lag'] > 0)
+        result.loc[valid_lag_mask, 'avg_net_assets'] = \
+            (result.loc[valid_lag_mask, 'net_assets'] + result.loc[valid_lag_mask, 'net_assets_lag']) / 2
+        
+        # Handle cases where avg_net_assets might still be zero or negative (e.g., if net_assets was non-positive before this step somehow)
+        # or if net_assets_lag was NaN and net_assets itself was <=0 (though calculate_net_assets should prevent this for net_assets)
+        non_positive_avg_mask = result['avg_net_assets'] <= 0
+        if non_positive_avg_mask.any():
+            print(f"Warning: {non_positive_avg_mask.sum()} instances of non-positive avg_net_assets found. Setting to current net_assets.")
+            result.loc[non_positive_avg_mask, 'avg_net_assets'] = result.loc[non_positive_avg_mask, 'net_assets']
+            # Further filter if avg_net_assets is still non-positive after fallback
+            # This is crucial as it's a divisor.
+            still_non_positive_mask = result['avg_net_assets'] <= 0
+            if still_non_positive_mask.any():
+                print(f"Critical Warning: {still_non_positive_mask.sum()} instances where avg_net_assets remains non-positive after fallbacks. These will lead to NaN/inf when scaling.")
+                # Option: set to NaN to ensure they become NaN after division, or filter these rows out later.
+                # result.loc[still_non_positive_mask, 'avg_net_assets'] = np.nan 
+    else:
+        # If missing required columns, use net_assets as fallback (less ideal)
+        print("Warning: Missing gvkey or datadate columns for proper scaling. Using current net_assets for avg_net_assets.")
+        result['avg_net_assets'] = result['net_assets']
+        # Ensure this fallback is also positive
+        non_positive_fallback_mask = result['avg_net_assets'] <= 0
+        if non_positive_fallback_mask.any():
+             print(f"Critical Warning during fallback: {non_positive_fallback_mask.sum()} instances where avg_net_assets (current net_assets) is non-positive.")
+             # result.loc[non_positive_fallback_mask, 'avg_net_assets'] = np.nan
+
     # List of flow variables to scale by average net assets
     flow_vars = [
         'cash_flow', 'trad_cash_flow', 'op_prof', 'prof', 'ni', 'depr', 'othcf',

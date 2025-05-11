@@ -349,15 +349,22 @@ def prepare_regression_sample(data, min_years=3):
         'delta_cash_scaled', 'delta_nwc_scaled', 'delta_debt_scaled',
         'issues_scaled', 'div_scaled', 'cash_flow_scaled_lag',
         'constrained', 'unconstrained', # from classification
-        'firm_id', 'year_id' # for fixed effects
+        'firm_id', 'year_id', # for fixed effects
+        # Add instruments to ensure they are not NaN for IV regressions
+        'ret_1', 'ret_2', 'ret_3', 'ret_4'
     ]
     # Add other controls if they are used in regressions directly from this sample
     control_vars_for_final_check = ['cash_lag', 'debt_lag'] 
     
     missing_check_vars = final_regression_vars + control_vars_for_final_check
     missing_before_final_dropna = len(sample)
-    sample = sample.dropna(subset=[var for var in missing_check_vars if var in sample.columns])
-    print(f"Dropped {missing_before_final_dropna - len(sample)} additional rows due to NaNs in final regression/control variables.")
+    # Ensure all variables in missing_check_vars actually exist in sample.columns before attempting to dropna
+    vars_to_check_in_dropna = [var for var in missing_check_vars if var in sample.columns]
+    if not vars_to_check_in_dropna:
+        print("Warning: No variables specified for final dropna step, or none of them exist in the sample.")
+    else:
+        sample = sample.dropna(subset=vars_to_check_in_dropna)
+    print(f"Dropped {missing_before_final_dropna - len(sample)} additional rows due to NaNs in final regression/control/instrument variables.")
 
     return sample
 

@@ -15,6 +15,7 @@ import pandas as pd
 import time
 import argparse
 from datetime import datetime
+import traceback # Added for full traceback printing
 try:
     from src.data_collection import collect_raw_data
     from src.variable_construction import construct_variables, save_constructed_data
@@ -174,6 +175,78 @@ def run_pipeline(start_year=1971, end_year=2023, force_refresh=False, skip_colle
     print(f"Number of unique firms in final sample: {regression_sample['gvkey'].nunique()}")
     print(f"Sample period: {regression_sample['fyear'].min()} to {regression_sample['fyear'].max()}")
     
+    # Clear constructed data to free memory
+    del constructed_data
+
+    # --- Start of new, more comprehensive data type cleaning ---
+    print("\n" + "-" * 80)
+    print("Inspecting and cleaning regression_sample data types (enhanced)...")
+    print("Original dtypes of regression_sample (full list):")
+    # Ensure all rows of dtypes are printed for proper diagnosis
+    with pd.option_context('display.max_rows', None): 
+        print(regression_sample.dtypes.to_string())
+
+    # Iterate over columns and attempt to convert to standard numeric types
+    for col_name in regression_sample.columns:
+        col_series = regression_sample[col_name] # Get the pandas Series for the column
+        
+        # Check for pandas extension dtypes (e.g., Int64, BooleanDtype) which might use pd.NA
+        # These can cause issues with numpy conversion if pd.NA is present
+        if pd.api.types.is_extension_array_dtype(col_series.dtype):
+            print(f"Column '{col_name}' has pandas extension dtype {col_series.dtype}.")
+            try:
+                # Convert to standard float; pd.NA will become np.nan.
+                # This handles Int64Dtype, Float64Dtype, BooleanDtype with pd.NA.
+                # For BooleanDtype: True -> 1.0, False -> 0.0, pd.NA -> np.nan
+                regression_sample[col_name] = col_series.astype(float) 
+                print(f"  Successfully converted '{col_name}' to {regression_sample[col_name].dtype} using .astype(float).")
+            except Exception as e:
+                # Fallback for extension types that might not directly convert to float (e.g., string-like extension types)
+                print(f"  .astype(float) failed for extension dtype column '{col_name}': {e}. Trying pd.to_numeric as a fallback.")
+                try:
+                    original_na_count = col_series.isna().sum() # Counts pd.NA as well
+                    regression_sample[col_name] = pd.to_numeric(col_series, errors='coerce')
+                    new_na_count = regression_sample[col_name].isna().sum()
+                    coerced_values_count = new_na_count - original_na_count
+                    # Check if successfully converted to a standard numpy dtype
+                    if regression_sample[col_name].dtype != 'object' and \
+                       not pd.api.types.is_extension_array_dtype(regression_sample[col_name].dtype):
+                        print(f"  Successfully converted '{col_name}' to {regression_sample[col_name].dtype} using pd.to_numeric.")
+                        if coerced_values_count > 0:
+                             print(f"    {coerced_values_count} values were coerced to NaN (from original pd.NA or unparseable values).")
+                    else:
+                        print(f"  Column '{col_name}' (extension type) remains problematic after pd.to_numeric: new dtype {regression_sample[col_name].dtype}.")
+                except Exception as e2:
+                    print(f"  pd.to_numeric also failed for extension dtype column '{col_name}': {e2}")
+
+        # Check for standard object dtypes (typically strings or mixed non-numeric types)
+        elif col_series.dtype == 'object':
+            print(f"Column '{col_name}' is of object type. Attempting conversion to numeric.")
+            original_na_count = col_series.isna().sum()
+            try:
+                regression_sample[col_name] = pd.to_numeric(col_series, errors='coerce')
+                new_na_count = regression_sample[col_name].isna().sum()
+                coerced_values_count = new_na_count - original_na_count
+                
+                if regression_sample[col_name].dtype != 'object':
+                    print(f"  Successfully converted '{col_name}' to {regression_sample[col_name].dtype}.")
+                    if coerced_values_count > 0:
+                        print(f"    {coerced_values_count} values were coerced to NaN.")
+                else:
+                    # This implies all values were unparseable strings if pd.to_numeric results in object
+                    print(f"  Column '{col_name}' remains object type. It likely consists entirely of non-convertible strings.")
+            except Exception as e:
+                print(f"  Could not convert column '{col_name}' to numeric due to an error: {e}")
+        # else:
+            # If desired, uncomment to see columns that are already standard numeric types
+            # print(f"Column '{col_name}' is {col_series.dtype}, already a standard numeric type, no conversion attempted by this block.")
+
+    print("\nCleaned dtypes of regression_sample (full list):")
+    with pd.option_context('display.max_rows', None):
+        print(regression_sample.dtypes.to_string())
+    print("-" * 80)
+    # --- End of new, more comprehensive data type cleaning ---
+    
     return regression_sample
 
 
@@ -232,7 +305,8 @@ def run_analysis(data_path=None, output_dir=None):
         data = pd.read_parquet(data_path, columns=available_columns)
         print(f"Loaded {len(data)} observations with {len(available_columns)} columns")
     except Exception as e:
-        print(f"Error loading specific columns, falling back to loading all columns: {e}")
+        print(f"Error loading specific columns, falling back to loading all columns:")
+        traceback.print_exc() # Modified to print full traceback
         data = pd.read_parquet(data_path)
         print(f"Loaded {len(data)} observations with all columns")
     
@@ -251,6 +325,75 @@ def run_analysis(data_path=None, output_dir=None):
     # Clear constructed data to free memory
     del constructed_data
     
+    # --- Start of new, more comprehensive data type cleaning ---
+    print("\n" + "-" * 80)
+    print("Inspecting and cleaning regression_sample data types (enhanced)...")
+    print("Original dtypes of regression_sample (full list):")
+    # Ensure all rows of dtypes are printed for proper diagnosis
+    with pd.option_context('display.max_rows', None): 
+        print(regression_sample.dtypes.to_string())
+
+    # Iterate over columns and attempt to convert to standard numeric types
+    for col_name in regression_sample.columns:
+        col_series = regression_sample[col_name] # Get the pandas Series for the column
+        
+        # Check for pandas extension dtypes (e.g., Int64, BooleanDtype) which might use pd.NA
+        # These can cause issues with numpy conversion if pd.NA is present
+        if pd.api.types.is_extension_array_dtype(col_series.dtype):
+            print(f"Column '{col_name}' has pandas extension dtype {col_series.dtype}.")
+            try:
+                # Convert to standard float; pd.NA will become np.nan.
+                # This handles Int64Dtype, Float64Dtype, BooleanDtype with pd.NA.
+                # For BooleanDtype: True -> 1.0, False -> 0.0, pd.NA -> np.nan
+                regression_sample[col_name] = col_series.astype(float) 
+                print(f"  Successfully converted '{col_name}' to {regression_sample[col_name].dtype} using .astype(float).")
+            except Exception as e:
+                # Fallback for extension types that might not directly convert to float (e.g., string-like extension types)
+                print(f"  .astype(float) failed for extension dtype column '{col_name}': {e}. Trying pd.to_numeric as a fallback.")
+                try:
+                    original_na_count = col_series.isna().sum() # Counts pd.NA as well
+                    regression_sample[col_name] = pd.to_numeric(col_series, errors='coerce')
+                    new_na_count = regression_sample[col_name].isna().sum()
+                    coerced_values_count = new_na_count - original_na_count
+                    # Check if successfully converted to a standard numpy dtype
+                    if regression_sample[col_name].dtype != 'object' and \
+                       not pd.api.types.is_extension_array_dtype(regression_sample[col_name].dtype):
+                        print(f"  Successfully converted '{col_name}' to {regression_sample[col_name].dtype} using pd.to_numeric.")
+                        if coerced_values_count > 0:
+                             print(f"    {coerced_values_count} values were coerced to NaN (from original pd.NA or unparseable values).")
+                    else:
+                        print(f"  Column '{col_name}' (extension type) remains problematic after pd.to_numeric: new dtype {regression_sample[col_name].dtype}.")
+                except Exception as e2:
+                    print(f"  pd.to_numeric also failed for extension dtype column '{col_name}': {e2}")
+
+        # Check for standard object dtypes (typically strings or mixed non-numeric types)
+        elif col_series.dtype == 'object':
+            print(f"Column '{col_name}' is of object type. Attempting conversion to numeric.")
+            original_na_count = col_series.isna().sum()
+            try:
+                regression_sample[col_name] = pd.to_numeric(col_series, errors='coerce')
+                new_na_count = regression_sample[col_name].isna().sum()
+                coerced_values_count = new_na_count - original_na_count
+                
+                if regression_sample[col_name].dtype != 'object':
+                    print(f"  Successfully converted '{col_name}' to {regression_sample[col_name].dtype}.")
+                    if coerced_values_count > 0:
+                        print(f"    {coerced_values_count} values were coerced to NaN.")
+                else:
+                    # This implies all values were unparseable strings if pd.to_numeric results in object
+                    print(f"  Column '{col_name}' remains object type. It likely consists entirely of non-convertible strings.")
+            except Exception as e:
+                print(f"  Could not convert column '{col_name}' to numeric due to an error: {e}")
+        # else:
+            # If desired, uncomment to see columns that are already standard numeric types
+            # print(f"Column '{col_name}' is {col_series.dtype}, already a standard numeric type, no conversion attempted by this block.")
+
+    print("\nCleaned dtypes of regression_sample (full list):")
+    with pd.option_context('display.max_rows', None):
+        print(regression_sample.dtypes.to_string())
+    print("-" * 80)
+    # --- End of new, more comprehensive data type cleaning ---
+    
     # Run analyses
     start_time = datetime.now()
     print(f"Analysis started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -261,43 +404,50 @@ def run_analysis(data_path=None, output_dir=None):
         print("Analyzing sample characteristics...")
         analyze_sample_characteristics(regression_sample, plots_dir)
     except Exception as e:
-        print(f"Error in sample characteristics analysis: {e}")
+        print(f"Error in sample characteristics analysis:")
+        traceback.print_exc() # Modified to print full traceback
     
     try:
         print("Analyzing constraint groups...")
         analyze_constraint_groups(regression_sample, plots_dir)
     except Exception as e:
-        print(f"Error in constraint groups analysis: {e}")
+        print(f"Error in constraint groups analysis:")
+        traceback.print_exc() # Modified to print full traceback
     
     try:
         print("Running baseline analysis...")
         run_baseline_analysis(regression_sample, plots_dir)
     except Exception as e:
-        print(f"Error in baseline analysis: {e}")
+        print(f"Error in baseline analysis:")
+        traceback.print_exc() # Modified to print full traceback
     
     try:
         print("Analyzing cash flow uses...")
         analyze_cash_flow_uses(regression_sample, plots_dir)
     except Exception as e:
-        print(f"Error in cash flow uses analysis: {e}")
+        print(f"Error in cash flow uses analysis:")
+        traceback.print_exc() # Modified to print full traceback
     
     try:
         print("Analyzing investment financing...")
         analyze_investment_financing(regression_sample, plots_dir)
     except Exception as e:
-        print(f"Error in investment financing analysis: {e}")
+        print(f"Error in investment financing analysis:")
+        traceback.print_exc() # Modified to print full traceback
     
     try:
         print("Comparing with original paper...")
         compare_with_original_paper(regression_sample, tables_dir)
     except Exception as e:
-        print(f"Error in comparison with original paper: {e}")
+        print(f"Error in comparison with original paper:")
+        traceback.print_exc() # Modified to print full traceback
     
     try:
         print("Running full regression analysis...")
         run_full_regression_analysis(regression_sample, tables_dir, plots_dir)
     except Exception as e:
-        print(f"Error in full regression analysis: {e}")
+        print(f"Error in full regression analysis:")
+        traceback.print_exc() # Modified to print full traceback
     
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds() / 60

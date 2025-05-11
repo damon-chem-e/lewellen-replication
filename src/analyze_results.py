@@ -17,14 +17,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 import gc # Import garbage collector
+from octopus.octopus import octopus # Added import for octopus
 
 # Add the project directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # Import our modules
 from src.regression_analysis import (
-    run_ols_regression, 
-    run_iv_regression, 
+    run_simple_ols_regression,
     run_table3_regressions,
     run_table4_regressions,
     run_table6_regressions,
@@ -247,22 +247,26 @@ def run_baseline_analysis(data, plots_dir):
         # Run regression for constrained firms
         const_data = decade_data[decade_data['constrained'] == 1]
         if len(const_data) > 30:  # Ensure enough observations
-            const_reg = run_ols_regression(
-                const_data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-                fe_firm=False, fe_year=False
+            const_reg = run_simple_ols_regression(
+                const_data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag']
             )
-            const_sensitivity = const_reg.params['cash_flow_scaled']
+            if const_reg:
+                const_sensitivity = const_reg.params['cash_flow_scaled']
+            else:
+                const_sensitivity = np.nan
         else:
             const_sensitivity = np.nan
         
         # Run regression for unconstrained firms
         unconst_data = decade_data[decade_data['unconstrained'] == 1]
         if len(unconst_data) > 30:  # Ensure enough observations
-            unconst_reg = run_ols_regression(
-                unconst_data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-                fe_firm=False, fe_year=False
+            unconst_reg = run_simple_ols_regression(
+                unconst_data, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag']
             )
-            unconst_sensitivity = unconst_reg.params['cash_flow_scaled']
+            if unconst_reg:
+                unconst_sensitivity = unconst_reg.params['cash_flow_scaled']
+            else:
+                unconst_sensitivity = np.nan
         else:
             unconst_sensitivity = np.nan
             
@@ -472,272 +476,326 @@ def analyze_investment_financing(data, plots_dir):
     print("Investment financing plots saved.")
 
 
+# === Helper Functions for Saving Regression Results ===
+
+def _save_results_recursive(obj, base_filename, output_dir):
+    """Recursively traverse *obj* and save any pandas DataFrame it contains.
+
+    If *obj* is a DataFrame, it is saved to *base_filename*.csv and .tex in
+    *output_dir*.  If *obj* is a dict, the function calls itself on each
+    value, appending the dict key to *base_filename* so that nested
+    structures (e.g. model → dependent variable → DataFrame) are saved with
+    informative file names.
+
+    This utility makes no assumptions about the exact nesting pattern of the
+    regression result dictionaries returned by functions in
+    ``regression_analysis.py``.  It therefore works for Tables 3–7 without
+    modification.
+    """
+    import pandas as _pd  # Local import to avoid polluting global namespace
+
+    # Base case: DataFrame – save as CSV and (attempt) LaTeX
+    if isinstance(obj, _pd.DataFrame):
+        if obj.empty:
+            print(f"Skipping empty DataFrame: {base_filename}")
+            return
+        csv_path = os.path.join(output_dir, f"{base_filename}.csv")
+        tex_path = os.path.join(output_dir, f"{base_filename}.tex")
+        try:
+            obj.to_csv(csv_path, index=False)
+            print(f"Saved CSV  → {csv_path}")
+        except Exception as e:
+            print(f"Error saving CSV for {base_filename}: {e}")
+        try:
+            # Some DataFrames may contain non-numeric data; keep escape=False
+            obj.to_latex(tex_path, index=False, escape=False)
+            print(f"Saved LaTeX → {tex_path}")
+        except Exception as e:
+            print(f"Error saving LaTeX for {base_filename}: {e}")
+
+    # Recursive case: dict – dive deeper
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            # Sanitize key for filenames (remove spaces, punctuation)
+            safe_key = str(k).replace(' ', '_')
+            _save_results_recursive(v, f"{base_filename}_{safe_key}", output_dir)
+
+    # Other types are ignored (e.g. None, list, etc.)
+    else:
+        print(f"Unhandled type {type(obj)} at {base_filename}; skipping.")
+
+
 def compare_with_original_paper(data, tables_dir):
     """
-    Compare key results with the original paper.
+    Compare key results with the original paper, run regressions to 
+    replicate key tables, and save them to the specified directory.
     
     Args:
         data (pd.DataFrame): Regression sample data
         tables_dir (str): Directory to save tables
     """
-    print("\n=== Comparison with Original Paper ===")
+    print("\n=== Comparison with Original Paper & Table Replication ===")
+
+    # --- Table 3: Baseline Investment-Cash Flow Regressions ---
+    print("\nReplicating and Saving Table 3: Baseline Investment-Cash Flow Regressions")
+    table3_results = run_table3_regressions(data)
+    if table3_results:
+        print("Table 3 regression dictionary keys:", list(table3_results.keys()))
+        _save_results_recursive(table3_results, "table3", tables_dir)
+    else:
+        print("Table 3 results dictionary is empty – nothing to save.")
+
+    # --- Table 4: Alternative Investment Measures ---
+    print("\nReplicating and Saving Table 4: Alternative Investment Measures")
+    table4_results = run_table4_regressions(data)
+    if table4_results:
+        print("Table 4 regression dictionary keys:", list(table4_results.keys()))
+        _save_results_recursive(table4_results, "table4", tables_dir)
+    else:
+        print("Table 4 results dictionary is empty – nothing to save.")
     
-    # Create subsamples
-    # Make copies to ensure original data is not modified by downstream regressions if they alter data in place
-    # and to allow explicit deletion later.
+    # --- Original coefficient comparison logic starts here ---
+    print("\n=== Comparing Coefficients with Original Paper ===")
+    octo = octopus()
+    # Set path to the R script for octopus, assuming 'octopus' directory is at project root
+    # Ensure this path is correct for your project structure
+    octopus_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'octopus') # Go up two levels for project root, then into octopus
+    r_script_path_candidate = os.path.join(octopus_dir, 'octo_reg.R')
+
+    # Check if R script exists, provide a fallback or warning
+    if os.path.exists(r_script_path_candidate):
+        octo.r_script_path = r_script_path_candidate
+    else:
+        # Try original relative path as a fallback if the above is not found
+        # This matches the structure implied if 'octopus' is a sibling to 'src'
+        octopus_dir_alt = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'octopus')
+        r_script_path_alt = os.path.join(octopus_dir_alt, 'octo_reg.R')
+        if os.path.exists(r_script_path_alt):
+            octo.r_script_path = r_script_path_alt
+            print(f"Using R script from: {r_script_path_alt}")
+        else:
+            print(f"Warning: R script for octopus not found at {r_script_path_candidate} or {r_script_path_alt}. Coefficient comparison via R will likely fail.")
+            # octo.r_script_path = None # Or handle this case as appropriate for octopus
+    
+    octo.workdir = tables_dir
+    
+    felm_formula_ols = "capx3_scaled ~ cash_flow_scaled + mb_lag | factor(gvkey) + factor(fyear) | 0 | gvkey + fyear"
+    felm_formula_iv = "capx3_scaled ~ cash_flow_scaled + mb_lag | factor(gvkey) + factor(fyear) | (mb_lag ~ ret_1 + ret_2 + ret_3 + ret_4) | gvkey + fyear"
+
     data_full_sample = data.copy()
     constrained_sample = data[data['constrained'] == 1].copy() if 'constrained' in data and (data['constrained'] == 1).any() else pd.DataFrame()
     unconstrained_sample = data[data['unconstrained'] == 1].copy() if 'unconstrained' in data and (data['unconstrained'] == 1).any() else pd.DataFrame()
     
-    # Check if we have both constraint groups
     has_constrained = not constrained_sample.empty
     has_unconstrained = not unconstrained_sample.empty
     
-    print(f"Full sample size: {len(data_full_sample)} observations")
-    print(f"Constrained subsample: {len(constrained_sample)} observations")
-    print(f"Unconstrained subsample: {len(unconstrained_sample)} observations")
-    
-    # Original paper values
+    print(f"Full sample size for R regressions: {len(data_full_sample)} observations")
+    print(f"Constrained subsample for R regressions: {len(constrained_sample)} observations")
+    print(f"Unconstrained subsample for R regressions: {len(unconstrained_sample)} observations")
+
     original_values = {
-        'OLS_Full': 0.35,
-        'OLS_Constrained': 0.72,
-        'OLS_Unconstrained': 0.30,
-        'IV_Full': 0.28,
-        'IV_Constrained': 0.63,
-        'IV_Unconstrained': 0.16
+        'OLS_Full': 0.35, 'OLS_Constrained': 0.72, 'OLS_Unconstrained': 0.30,
+        'IV_Full': 0.28, 'IV_Constrained': 0.63, 'IV_Unconstrained': 0.16
     }
-    
-    # Initialize replication values
     replication_values = {}
-    
-    # Run OLS regressions
-    print("Running OLS for full sample...")
-    ols_results_full = run_ols_regression(
-        data_full_sample, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-        fe_firm=True, fe_year=True
-    )
-    replication_values['OLS_Full'] = ols_results_full.params['cash_flow_scaled']
-    del ols_results_full
-    gc.collect()
-    print("OLS for full sample complete.")
 
-    # Run IV regression for full sample
-    instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-    
-    print("Running IV for full sample...")
-    try:
-        first_stage_full, second_stage_full = run_iv_regression(
-            data_full_sample, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
-        )
-        replication_values['IV_Full'] = second_stage_full.params['cash_flow_scaled']
-        del first_stage_full, second_stage_full
-    except Exception as e:
-        print(f"Warning: Could not run IV regression for full sample: {e}")
-        replication_values['IV_Full'] = None
-    finally:
-        gc.collect()
-    print("IV for full sample complete.")
-    # Delete the full sample copy as it's no longer needed for these specific comparisons if subsamples are used next.
-    del data_full_sample
-    gc.collect()
+    # Run OLS regressions using R via octopus
+    if hasattr(octo, 'r_script_path') and octo.r_script_path and os.path.exists(octo.r_script_path): # Check if R script path is set and valid
+        print("Running OLS for full sample (via R)...")
+        try:
+            r_ols_results_full = octo.run_regressions(
+                df=data_full_sample, regression_commands=['felm'],
+                regression_specifications=[felm_formula_ols], stargazer_specs=[]
+            )
+            ols_coeffs_df_full = r_ols_results_full[r_ols_results_full['variable'] == 'cash_flow_scaled']
+            if not ols_coeffs_df_full.empty:
+                replication_values['OLS_Full'] = ols_coeffs_df_full['coefficient'].iloc[0]
+            else:
+                replication_values['OLS_Full'] = None
+        except Exception as e:
+            print(f"Warning: Could not run OLS regression for full sample via R: {e}")
+            replication_values['OLS_Full'] = None
+        
+        print("Running IV for full sample (via R)...")
+        try:
+            r_iv_results_full = octo.run_regressions(
+                df=data_full_sample, regression_commands=['felm'],
+                regression_specifications=[felm_formula_iv], stargazer_specs=[]
+            )
+            iv_coeffs_df_full = r_iv_results_full[r_iv_results_full['variable'] == 'cash_flow_scaled']
+            if not iv_coeffs_df_full.empty:
+                replication_values['IV_Full'] = iv_coeffs_df_full['coefficient'].iloc[0]
+            else:
+                replication_values['IV_Full'] = None
+        except Exception as e:
+            print(f"Warning: Could not run IV regression for full sample via R: {e}")
+            replication_values['IV_Full'] = None
 
-    # Run regressions for constrained firms if available
-    if has_constrained:
-        print("Running OLS for constrained sample...")
-        try:
-            constrained_ols_results = run_ols_regression(
-                constrained_sample, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-                fe_firm=True, fe_year=True
-            )
-            replication_values['OLS_Constrained'] = constrained_ols_results.params['cash_flow_scaled']
-            del constrained_ols_results
-        except Exception as e:
-            print(f"Warning: Could not run OLS for constrained firms: {e}")
-            replication_values['OLS_Constrained'] = None
-        finally:
-            gc.collect()
-        print("OLS for constrained sample complete.")
-        
-        print("Running IV for constrained sample...")
-        try:
-            first_stage_c, second_stage_c = run_iv_regression(
-                constrained_sample, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
-            )
-            replication_values['IV_Constrained'] = second_stage_c.params['cash_flow_scaled']
-            del first_stage_c, second_stage_c
-        except Exception as e:
-            print(f"Warning: Could not run IV regression for constrained firms: {e}")
-            replication_values['IV_Constrained'] = None
-        finally:
-            gc.collect()
-        print("IV for constrained sample complete.")
-    else:
-        print("No constrained firms in sample, skipping constrained regressions")
-        replication_values['OLS_Constrained'] = None
-        replication_values['IV_Constrained'] = None
-    
-    # Run regressions for unconstrained firms if available
-    if has_unconstrained:
-        print("Running OLS for unconstrained sample...")
-        try:
-            unconstrained_ols_results = run_ols_regression(
-                unconstrained_sample, 'capx3_scaled', ['cash_flow_scaled', 'mb_lag'],
-                fe_firm=True, fe_year=True
-            )
-            replication_values['OLS_Unconstrained'] = unconstrained_ols_results.params['cash_flow_scaled']
-            del unconstrained_ols_results
-        except Exception as e:
-            print(f"Warning: Could not run OLS for unconstrained firms: {e}")
-            replication_values['OLS_Unconstrained'] = None
-        finally:
-            gc.collect()
-        print("OLS for unconstrained sample complete.")
-        
-        print("Running IV for unconstrained sample...")
-        try:
-            first_stage_u, second_stage_u = run_iv_regression(
-                unconstrained_sample, 'capx3_scaled', 'mb_lag', instruments, ['cash_flow_scaled']
-            )
-            replication_values['IV_Unconstrained'] = second_stage_u.params['cash_flow_scaled']
-            del first_stage_u, second_stage_u
-        except Exception as e:
-            print(f"Warning: Could not run IV regression for unconstrained firms: {e}")
-            replication_values['IV_Unconstrained'] = None
-        finally:
-            gc.collect()
-        print("IV for unconstrained sample complete.")
-    else:
-        print("No unconstrained firms in sample, skipping unconstrained regressions")
-        replication_values['OLS_Unconstrained'] = None
-        replication_values['IV_Unconstrained'] = None
-    
-    # Create comparison dataframe
-    comparison_data = {'Original': original_values, 'Replication': replication_values}
-    
-    # Calculate differences only for values that exist
-    diff_data = {}
-    pct_diff_data = {}
-    
-    for k in original_values.keys():
-        if replication_values.get(k) is not None:
-            diff_data[k] = replication_values[k] - original_values[k]
-            pct_diff_data[k] = (replication_values[k] / original_values[k] - 1) * 100
+        if has_constrained:
+            print("Running OLS for constrained sample (via R)...")
+            try:
+                r_ols_results_constrained = octo.run_regressions(
+                    df=constrained_sample, regression_commands=['felm'],
+                    regression_specifications=[felm_formula_ols], stargazer_specs=[]
+                )
+                ols_coeffs_df_constrained = r_ols_results_constrained[r_ols_results_constrained['variable'] == 'cash_flow_scaled']
+                if not ols_coeffs_df_constrained.empty:
+                    replication_values['OLS_Constrained'] = ols_coeffs_df_constrained['coefficient'].iloc[0]
+                else:
+                    replication_values['OLS_Constrained'] = None
+            except Exception as e:
+                print(f"Warning: Could not run OLS for constrained firms via R: {e}")
+                replication_values['OLS_Constrained'] = None
+
+            print("Running IV for constrained sample (via R)...")
+            try:
+                r_iv_results_constrained = octo.run_regressions(
+                    df=constrained_sample, regression_commands=['felm'],
+                    regression_specifications=[felm_formula_iv], stargazer_specs=[]
+                )
+                iv_coeffs_df_constrained = r_iv_results_constrained[r_iv_results_constrained['variable'] == 'cash_flow_scaled']
+                if not iv_coeffs_df_constrained.empty:
+                    replication_values['IV_Constrained'] = iv_coeffs_df_constrained['coefficient'].iloc[0]
+                else:
+                    replication_values['IV_Constrained'] = None
+            except Exception as e:
+                print(f"Warning: Could not run IV regression for constrained firms via R: {e}")
+                replication_values['IV_Constrained'] = None
         else:
-            diff_data[k] = None
-            pct_diff_data[k] = None
-    
-    comparison_data['Difference'] = diff_data
-    comparison_data['Percent Diff'] = pct_diff_data
-    
-    comparison = pd.DataFrame(comparison_data)
-    
-    # Print comparison
-    print("Comparison of key coefficients with original paper:")
-    print(comparison.round(4))
-    
-    # Save comparison
-    comparison.to_csv(os.path.join(tables_dir, 'paper_comparison.csv'))
-    
-    # Create visual comparison only for available results
-    plt.figure(figsize=(10, 6))
-    
-    # Filter for results that have values
+            replication_values['OLS_Constrained'], replication_values['IV_Constrained'] = None, None
+            print("Skipping R regressions for constrained sample (no data).")
+
+        if has_unconstrained:
+            print("Running OLS for unconstrained sample (via R)...")
+            try:
+                r_ols_results_unconstrained = octo.run_regressions(
+                    df=unconstrained_sample, regression_commands=['felm'],
+                    regression_specifications=[felm_formula_ols], stargazer_specs=[]
+                )
+                ols_coeffs_df_unconstrained = r_ols_results_unconstrained[r_ols_results_unconstrained['variable'] == 'cash_flow_scaled']
+                if not ols_coeffs_df_unconstrained.empty:
+                    replication_values['OLS_Unconstrained'] = ols_coeffs_df_unconstrained['coefficient'].iloc[0]
+                else:
+                    replication_values['OLS_Unconstrained'] = None
+            except Exception as e:
+                print(f"Warning: Could not run OLS for unconstrained firms via R: {e}")
+                replication_values['OLS_Unconstrained'] = None
+
+            print("Running IV for unconstrained sample (via R)...")
+            try:
+                r_iv_results_unconstrained = octo.run_regressions(
+                    df=unconstrained_sample, regression_commands=['felm'],
+                    regression_specifications=[felm_formula_iv], stargazer_specs=[]
+                )
+                iv_coeffs_df_unconstrained = r_iv_results_unconstrained[r_iv_results_unconstrained['variable'] == 'cash_flow_scaled']
+                if not iv_coeffs_df_unconstrained.empty:
+                    replication_values['IV_Unconstrained'] = iv_coeffs_df_unconstrained['coefficient'].iloc[0]
+                else:
+                    replication_values['IV_Unconstrained'] = None
+            except Exception as e:
+                print(f"Warning: Could not run IV regression for unconstrained firms via R: {e}")
+                replication_values['IV_Unconstrained'] = None
+        else:
+            replication_values['OLS_Unconstrained'], replication_values['IV_Unconstrained'] = None, None
+            print("Skipping R regressions for unconstrained sample (no data).")
+    else:
+        print("Skipping all R-based coefficient comparisons as R script path is not valid.")
+        # Fill replication_values with None if R part is skipped
+        for k in original_values.keys():
+            replication_values[k] = None
+            
+    del data_full_sample, constrained_sample, unconstrained_sample # Clean up copies
+    gc.collect()
+
+    comparison_data = {'Original': original_values, 'Replication': replication_values}
+    diff_data, pct_diff_data = {}, {}
+    for k in original_values.keys():
+        if replication_values.get(k) is not None and original_values.get(k) is not None:
+            diff_data[k] = replication_values[k] - original_values[k]
+            if original_values[k] != 0: # Avoid division by zero
+                 pct_diff_data[k] = (replication_values[k] / original_values[k] - 1) * 100
+            else:
+                 pct_diff_data[k] = np.nan # Or some other indicator for undefined percentage
+        else:
+            diff_data[k], pct_diff_data[k] = None, None
+    comparison_data['Difference'], comparison_data['Percent Diff'] = diff_data, pct_diff_data
+    comparison_df = pd.DataFrame(comparison_data)
+
+    print("\nComparison of key coefficients with original paper:")
+    print(comparison_df.round(4))
+    comparison_csv_path = os.path.join(tables_dir, 'paper_coefficient_comparison.csv')
+    comparison_df.to_csv(comparison_csv_path)
+    print(f"Coefficient comparison table saved to {comparison_csv_path}")
+
+    plt.figure(figsize=(12, 7)) # Adjusted figure size
     available_keys = [k for k in replication_values.keys() if replication_values[k] is not None]
-    
     if available_keys:
-        # Create the bar chart
         x = np.arange(len(available_keys))
         width = 0.35
-        
         original = [original_values[k] for k in available_keys]
         replication = [replication_values[k] for k in available_keys]
         
-        plt.bar(x - width/2, original, width, label='Original Paper')
-        plt.bar(x + width/2, replication, width, label='Replication')
+        fig, ax = plt.subplots(figsize=(12,7)) # Use subplots for better control
+        rects1 = ax.bar(x - width/2, original, width, label='Original Paper')
+        rects2 = ax.bar(x + width/2, replication, width, label='Replication')
         
-        plt.xlabel('Model')
-        plt.ylabel('Cash Flow Coefficient')
-        plt.title('Comparison of Cash Flow Coefficients with Original Paper')
-        plt.xticks(x, available_keys, rotation=45)
-        plt.legend()
+        ax.set_ylabel('Cash Flow Coefficient')
+        ax.set_title('Comparison of Cash Flow Coefficients with Original Paper')
+        ax.set_xticks(x)
+        ax.set_xticklabels(available_keys, rotation=45, ha="right")
+        ax.legend()
+        fig.tight_layout() # Use fig.tight_layout()
+        plot_path = os.path.join(tables_dir, 'paper_coefficient_comparison_plot.png') # Save plot in tables_dir
+        plt.savefig(plot_path, dpi=300)
+        print(f"Coefficient comparison plot saved to {plot_path}")
     else:
-        # No results to plot
-        plt.text(0.5, 0.5, "No comparison results available", 
-                 horizontalalignment='center', verticalalignment='center',
-                 transform=plt.gca().transAxes)
-        plt.title('Comparison with Original Paper')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(tables_dir, 'paper_comparison.png'), dpi=300)
-    plt.close()
-    
-    print("Comparison with original paper saved.")
-    # Clean up subsample DataFrames if they were created
-    if has_constrained:
-        del constrained_sample
-    if has_unconstrained:
-        del unconstrained_sample
+        print("No replication coefficients available to plot.")
+    plt.close() # Close the plot
+
+    # Clean up DataFrames used for tables if they were created
+    if 'table3_results' in locals() and table3_results is not None: del table3_results
+    if 'table4_results' in locals() and table4_results is not None: del table4_results
     gc.collect()
 
 
 def run_full_regression_analysis(data, tables_dir, plots_dir):
     """
-    Run full regression analysis and save results.
+    Run all regression analyses, save tables and plots.
     
     Args:
         data (pd.DataFrame): Regression sample data
         tables_dir (str): Directory to save tables
         plots_dir (str): Directory to save plots
     """
-    print("\n=== Running Full Regression Analysis ===")
+    print("\n=== Full Regression Analysis ===")
     
-    # Check if we have constrained and unconstrained groups
-    constrained = data[data['constrained'] == 1]
-    unconstrained = data[data['unconstrained'] == 1]
-    has_constraint_groups = len(constrained) > 0 and len(unconstrained) > 0
-    
-    # Run Table 3 regressions (OLS investment-cash flow sensitivities)
-    print("Running Table 3 regressions...")
-    try:
-        table3_results = run_table3_regressions(data)
-    except Exception as e:
-        print(f"Error running Table 3 regressions: {e}")
-    
-    # Run Table 4 regressions (OLS by constraint)
-    if has_constraint_groups:
-        print("Running Table 4 regressions...")
-        try:
-            table4_results = run_table4_regressions(data)
-        except Exception as e:
-            print(f"Error running Table 4 regressions: {e}")
+    # --- Table 6: Sources and Uses of Funds ---
+    print("\nReplicating and Saving Table 6: Sources and Uses of Funds")
+    table6_results = run_table6_regressions(data)
+    if table6_results:
+        print("Table 6 regression dictionary keys:", list(table6_results.keys()))
+        _save_results_recursive(table6_results, "table6", tables_dir)
     else:
-        print("Skipping Table 4 regressions due to missing constraint groups")
-    
-    # Run Table 6 regressions (IV regressions)
-    print("Running Table 6 regressions...")
-    try:
-        table6_results = run_table6_regressions(data)
-    except Exception as e:
-        print(f"Error running Table 6 regressions: {e}")
-    
-    # Run Table 7 regressions (IV by constraint)
-    if has_constraint_groups:
-        print("Running Table 7 regressions...")
-        try:
-            table7_results = run_table7_regressions(data)
-        except Exception as e:
-            print(f"Error running Table 7 regressions: {e}")
+        print("Table 6 results dictionary is empty – nothing to save.")
+        
+    # --- Table 7: Financing of Investment ---
+    print("\nReplicating and Saving Table 7: Financing of Investment")
+    table7_results = run_table7_regressions(data)
+    if table7_results:
+        print("Table 7 regression dictionary keys:", list(table7_results.keys()))
+        _save_results_recursive(table7_results, "table7", tables_dir)
     else:
-        print("Skipping Table 7 regressions due to missing constraint groups")
+        print("Table 7 results dictionary is empty – nothing to save.")
+        
+    # --- Plot Investment-Cash Flow Sensitivity for Table 7 ---
+    print("\nPlotting Investment-Cash Flow Sensitivity for Table 7")
+    plot_investment_cash_flow_sensitivity(data, plots_dir)
     
-    # Create investment-cash flow sensitivity plots
-    print("Creating investment-cash flow sensitivity plots...")
-    try:
-        plot_investment_cash_flow_sensitivity(data, plots_dir)
-    except Exception as e:
-        print(f"Error creating investment-cash flow sensitivity plots: {e}")
-    
-    print("Full regression analysis completed.")
+    # Clean up memory
+    if 'table6_results' in locals() and table6_results is not None: del table6_results
+    if 'table7_results' in locals() and table7_results is not None: del table7_results
+    gc.collect()
+    print("\nFull regression analysis, table saving, and plotting complete.")
 
 
 def main():

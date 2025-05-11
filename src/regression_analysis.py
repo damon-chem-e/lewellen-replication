@@ -2,613 +2,653 @@
 Regression Analysis Module for Lewellen and Lewellen (2016) Replication.
 
 This module implements the OLS and IV regressions specified in the original study,
-focusing on investment-cash flow sensitivities and measurement error correction.
+focusing on investment-cash flow sensitivities and measurement error correction,
+now primarily using R's felm via the octopus wrapper for efficiency with fixed effects.
 """
 
 import pandas as pd
 import numpy as np
 import os
-import statsmodels.api as sm
-from statsmodels.iolib.summary2 import summary_col
+# No longer using statsmodels directly for FE regressions here
+# import statsmodels.api as sm
+# from statsmodels.iolib.summary2 import summary_col
 import matplotlib.pyplot as plt
 import seaborn as sns
+from octopus.octopus import octopus # Import octopus
 
+# Initialize Octopus instance for use in this module
+# Assumes regression_analysis.py is in 'src/' and octo_reg.R is in 'octopus/' at project root
+try:
+    OCTOPUS_INSTANCE = octopus()
+    OCTOPUS_INSTANCE.r_script_path = os.path.join(os.path.dirname(__file__), '..', 'octopus', 'octo_reg.R')
+    # OCTOPUS_INSTANCE.workdir will use its default (None), leading to temp dirs per call.
+except Exception as e:
+    print(f"Error initializing Octopus: {e}")
+    OCTOPUS_INSTANCE = None
 
-def run_ols_regression(data, dependent_var, independent_vars, fe_firm=True, fe_year=True):
+# The old run_ols_regression, run_first_stage_regression, and run_iv_regression
+# are no longer needed as their functionality with high-cardinality FEs
+# is replaced by calls to R's felm via OCTOPUS_INSTANCE.
+
+def run_simple_ols_regression(data, dependent_var, independent_vars, cluster_col='gvkey'):
     """
-    Run OLS regression with firm and year fixed effects.
+    Run a simple OLS regression using statsmodels.
+    This version does NOT handle fixed effects automatically.
+    It supports clustering of standard errors.
     
     Args:
-        data (pd.DataFrame): Regression sample data
-        dependent_var (str): Name of dependent variable
-        independent_vars (list): List of independent variable names
-        fe_firm (bool): Include firm fixed effects
-        fe_year (bool): Include year fixed effects
+        data (pd.DataFrame): Regression sample data.
+        dependent_var (str): Name of the dependent variable.
+        independent_vars (list): List of independent variable names.
+        cluster_col (str, optional): Column name to cluster standard errors by. Defaults to 'gvkey'.
+                                     If None, standard errors are not clustered.
         
     Returns:
-        sm.regression.linear_model.RegressionResultsWrapper: Regression results
+        statsmodels.regression.linear_model.RegressionResultsWrapper: Regression results.
     """
-    # Create formula for regression
-    X = independent_vars.copy()
-    
-    # Add fixed effects if requested
-    if fe_firm:
-        # Create firm dummies (but exclude from formula - will be added as dummy variables)
-        firm_dummies = pd.get_dummies(data['firm_id'], prefix='firm', drop_first=True)
-        X_with_fe = pd.concat([data[X], firm_dummies], axis=1)
-    else:
-        X_with_fe = data[X].copy()
-    
-    if fe_year:
-        # Create year dummies
-        year_dummies = pd.get_dummies(data['year_id'], prefix='year', drop_first=True)
-        X_with_fe = pd.concat([X_with_fe, year_dummies], axis=1)
-    
+    import statsmodels.api as sm # Import locally as it's only for this function now
+
+    X_df = data[independent_vars].copy()
+    y_df = data[dependent_var].copy()
+
+    # Convert boolean columns to int (0 or 1)
+    for col in X_df.columns:
+        if X_df[col].dtype == 'bool':
+            X_df[col] = X_df[col].astype(int)
+
     # Add constant
-    X_with_fe = sm.add_constant(X_with_fe)
+    X_with_const = sm.add_constant(X_df)
     
-    # Run regression
-    model = sm.OLS(data[dependent_var], X_with_fe)
-    results = model.fit(cov_type='cluster', cov_kwds={'groups': data['gvkey']})
+    # Drop rows with NaNs in X or y, as sm.OLS requires this.
+    # Ensure alignment between X and y after dropping NaNs.
+    combined_df = pd.concat([y_df, X_with_const], axis=1).dropna()
+    y_clean = combined_df[dependent_var]
+    X_clean = combined_df[X_with_const.columns]
+
+    if y_clean.empty or X_clean.empty:
+        print(f"Warning: Not enough data for {dependent_var} ~ {' + '.join(independent_vars)} after NaN removal.")
+        return None # Or raise an error
+
+    model = sm.OLS(y_clean, X_clean)
     
-    # Print summary of key coefficients (not all the FE)
-    print(f"\nOLS Regression Results for {dependent_var}")
-    print("=" * 50)
-    print(f"R-squared: {results.rsquared:.4f}")
-    print(f"Observations: {results.nobs}")
+    if cluster_col and cluster_col in data.columns:
+        # Align cluster groups with the cleaned data
+        cluster_groups = data.loc[X_clean.index, cluster_col]
+        results = model.fit(cov_type='cluster', cov_kwds={'groups': cluster_groups})
+    else:
+        if cluster_col:
+            print(f"Warning: Cluster column '{cluster_col}' not found or not specified. Fitting with non-robust SEs.")
+        results = model.fit() # Standard errors
     
-    # Print coefficients and t-stats for main variables
-    print("\nCoefficients:")
-    for var in independent_vars:
-        if var in results.params.index:
-            coef = results.params[var]
-            t_stat = results.tvalues[var]
-            print(f"{var}: {coef:.4f} (t={t_stat:.2f})")
-    
+    # Optional: Print a brief summary
+    print(f"\nSimple OLS Results for {dependent_var} ~ {' + '.join(independent_vars)}")
+    print(f"R-squared: {results.rsquared:.4f}, N.obs: {results.nobs}")
+    # for var in independent_vars:
+    #     if var in results.params.index:
+    #         print(f"  {var}: {results.params[var]:.4f} (t={results.tvalues[var]:.2f})")
+            
     return results
-
-
-def run_first_stage_regression(data, y_var, instruments, controls=None):
-    """
-    Run first-stage regression for IV estimation.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        y_var (str): Endogenous variable (MB ratio)
-        instruments (list): List of instruments (cash flow, returns)
-        controls (list): Additional control variables
-        
-    Returns:
-        sm.regression.linear_model.RegressionResultsWrapper: First-stage results
-        pd.Series: Fitted values for use in second stage
-    """
-    # Combine instruments and controls
-    X_vars = instruments.copy()
-    if controls is not None:
-        X_vars.extend(controls)
-    
-    # Create firm and year fixed effects
-    firm_dummies = pd.get_dummies(data['firm_id'], prefix='firm', drop_first=True)
-    year_dummies = pd.get_dummies(data['year_id'], prefix='year', drop_first=True)
-    
-    # Combine all X variables
-    X = pd.concat([data[X_vars], firm_dummies, year_dummies], axis=1)
-    X = sm.add_constant(X)
-    
-    # Run regression
-    model = sm.OLS(data[y_var], X)
-    results = model.fit(cov_type='cluster', cov_kwds={'groups': data['gvkey']})
-    
-    # Generate fitted values
-    fitted_values = results.predict(X)
-    
-    # Print summary of key coefficients
-    print(f"\nFirst-Stage Regression Results for {y_var}")
-    print("=" * 50)
-    print(f"R-squared: {results.rsquared:.4f}")
-    print(f"F-statistic (instruments): {results.fvalue:.2f}")
-    print(f"Observations: {results.nobs}")
-    
-    # Print coefficients and t-stats for instruments
-    print("\nInstrument Coefficients:")
-    for var in instruments:
-        if var in results.params.index:
-            coef = results.params[var]
-            t_stat = results.tvalues[var]
-            print(f"{var}: {coef:.4f} (t={t_stat:.2f})")
-    
-    return results, fitted_values
-
-
-def run_iv_regression(data, dependent_var, endogenous_var, instruments, controls=None):
-    """
-    Run IV 2SLS regression with firm and year fixed effects.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        dependent_var (str): Dependent variable (e.g., investment measure)
-        endogenous_var (str): Endogenous variable (MB ratio)
-        instruments (list): List of instruments (cash flow, returns)
-        controls (list): Additional control variables
-        
-    Returns:
-        tuple: (First-stage results, Second-stage results)
-    """
-    # Step 1: First-stage regression
-    first_stage, mb_fitted = run_first_stage_regression(
-        data, endogenous_var, instruments, controls
-    )
-    
-    # Add fitted values to data
-    data_copy = data.copy()
-    data_copy[f"{endogenous_var}_fitted"] = mb_fitted
-    
-    # Step 2: Second-stage regression
-    # Replace endogenous variable with fitted values
-    second_stage_vars = []
-    if controls is not None:
-        second_stage_vars.extend(controls)
-    
-    # Add fitted value instead of original endogenous variable
-    second_stage_vars.append(f"{endogenous_var}_fitted")
-    
-    # Run second stage regression
-    second_stage = run_ols_regression(
-        data_copy, dependent_var, second_stage_vars, fe_firm=True, fe_year=True
-    )
-    
-    return first_stage, second_stage
-
 
 def run_table3_regressions(data):
     """
-    Replicate Table 3 from the original paper: OLS investment-cash flow regressions.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        
-    Returns:
-        dict: Dictionary of regression results
+    Replicate Table 3: OLS investment-cash flow regressions using felm.
     """
-    print("\nReplicating Table 3: OLS Investment-Cash Flow Regressions")
+    if OCTOPUS_INSTANCE is None:
+        raise RuntimeError("Octopus instance not initialized. Cannot run R regressions.")
+
+    print("\nReplicating Table 3: OLS Investment-Cash Flow Regressions (via R felm)")
     print("=" * 70)
     
-    # Dependent variables (uses of cash flow)
     dependent_vars = [
         'delta_cash_scaled', 'delta_nwc_scaled', 
         'capx1_scaled', 'capx2_scaled', 'capx3_scaled',
         'delta_debt_scaled', 'issues_scaled', 'div_scaled'
     ]
     
-    # Store results
     table3_results = {}
-    
+    fe_str = "| factor(gvkey) + factor(fyear) | 0 | gvkey + fyear"
+
     # Model 1: CF_t and MB_t-1
     print("\nModel 1: CF_t and MB_t-1")
-    model1_results = {}
+    model1_vars = ['cash_flow_scaled', 'mb_lag']
+    model1_rhs = " + ".join(model1_vars)
+    model1_results_dict = {}
     for dep_var in dependent_vars:
-        result = run_ols_regression(
-            data, dep_var, ['cash_flow_scaled', 'mb_lag']
-        )
-        model1_results[dep_var] = result
-    
-    table3_results['model1'] = model1_results
+        formula = f"{dep_var} ~ {model1_rhs} {fe_str}"
+        try:
+            result_df = OCTOPUS_INSTANCE.run_regressions(
+                df=data, regression_commands=['felm'],
+                regression_specifications=[formula], stargazer_specs=[]
+            )
+            model1_results_dict[dep_var] = result_df
+        except Exception as e:
+            print(f"Error running R regression for {dep_var} ~ {model1_rhs}: {e}")
+            model1_results_dict[dep_var] = pd.DataFrame() # Store empty df on error
+    table3_results['model1'] = model1_results_dict
     
     # Model 2: Add CF_t-1
     print("\nModel 2: Add CF_t-1")
-    model2_results = {}
+    model2_vars = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'mb_lag']
+    model2_rhs = " + ".join(model2_vars)
+    model2_results_dict = {}
     for dep_var in dependent_vars:
-        result = run_ols_regression(
-            data, dep_var, ['cash_flow_scaled', 'cash_flow_scaled_lag', 'mb_lag']
-        )
-        model2_results[dep_var] = result
-    
-    table3_results['model2'] = model2_results
+        formula = f"{dep_var} ~ {model2_rhs} {fe_str}"
+        try:
+            result_df = OCTOPUS_INSTANCE.run_regressions(
+                df=data, regression_commands=['felm'],
+                regression_specifications=[formula], stargazer_specs=[]
+            )
+            model2_results_dict[dep_var] = result_df
+        except Exception as e:
+            print(f"Error running R regression for {dep_var} ~ {model2_rhs}: {e}")
+            model2_results_dict[dep_var] = pd.DataFrame()
+    table3_results['model2'] = model2_results_dict
     
     # Model 3: Add CASH_t-1 and DEBT_t-1
     print("\nModel 3: Add CASH_t-1 and DEBT_t-1")
-    model3_results = {}
+    model3_vars = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'mb_lag', 'cash_lag', 'debt_lag']
+    model3_rhs = " + ".join(model3_vars)
+    model3_results_dict = {}
     for dep_var in dependent_vars:
-        result = run_ols_regression(
-            data, dep_var, 
-            ['cash_flow_scaled', 'cash_flow_scaled_lag', 'mb_lag', 'cash_lag', 'debt_lag']
-        )
-        model3_results[dep_var] = result
-    
-    table3_results['model3'] = model3_results
+        formula = f"{dep_var} ~ {model3_rhs} {fe_str}"
+        try:
+            result_df = OCTOPUS_INSTANCE.run_regressions(
+                df=data, regression_commands=['felm'],
+                regression_specifications=[formula], stargazer_specs=[]
+            )
+            model3_results_dict[dep_var] = result_df
+        except Exception as e:
+            print(f"Error running R regression for {dep_var} ~ {model3_rhs}: {e}")
+            model3_results_dict[dep_var] = pd.DataFrame()
+    table3_results['model3'] = model3_results_dict
     
     return table3_results
 
 
 def run_table4_regressions(data):
     """
-    Replicate Table 4 from the original paper: OLS regressions for constrained vs. unconstrained firms.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        
-    Returns:
-        dict: Dictionary of regression results for constrained and unconstrained subsamples
+    Replicate Table 4: OLS by constraint using felm.
     """
-    print("\nReplicating Table 4: OLS Regressions by Financial Constraint")
+    if OCTOPUS_INSTANCE is None:
+        raise RuntimeError("Octopus instance not initialized. Cannot run R regressions.")
+
+    print("\nReplicating Table 4: OLS Regressions by Financial Constraint (via R felm)")
     print("=" * 70)
     
-    # Dependent variables (uses of cash flow)
     dependent_vars = [
         'delta_cash_scaled', 'delta_nwc_scaled', 
         'capx1_scaled', 'capx2_scaled', 'capx3_scaled',
         'delta_debt_scaled', 'issues_scaled', 'div_scaled'
     ]
     
-    # Create constrained and unconstrained subsamples
     constrained_data = data[data['constrained'] == 1].copy()
     unconstrained_data = data[data['unconstrained'] == 1].copy()
     
     print(f"Constrained subsample: {len(constrained_data)} observations")
     print(f"Unconstrained subsample: {len(unconstrained_data)} observations")
     
-    # Store results
     table4_results = {'constrained': {}, 'unconstrained': {}}
-    
-    # Model 1 for constrained firms
+    fe_str = "| factor(gvkey) + factor(fyear) | 0 | gvkey + fyear"
+    model_vars = ['cash_flow_scaled', 'mb_lag']
+    model_rhs = " + ".join(model_vars)
+
+    # Constrained firms
     print("\nConstrained Firms: CF_t and MB_t-1")
-    for dep_var in dependent_vars:
-        result = run_ols_regression(
-            constrained_data, dep_var, ['cash_flow_scaled', 'mb_lag']
-        )
-        table4_results['constrained'][dep_var] = result
+    constrained_results_dict = {}
+    if not constrained_data.empty:
+        for dep_var in dependent_vars:
+            formula = f"{dep_var} ~ {model_rhs} {fe_str}"
+            try:
+                result_df = OCTOPUS_INSTANCE.run_regressions(
+                    df=constrained_data, regression_commands=['felm'],
+                    regression_specifications=[formula], stargazer_specs=[]
+                )
+                constrained_results_dict[dep_var] = result_df
+            except Exception as e:
+                print(f"Error running R regression for constrained {dep_var} ~ {model_rhs}: {e}")
+                constrained_results_dict[dep_var] = pd.DataFrame()
+    table4_results['constrained'] = constrained_results_dict
     
-    # Model 1 for unconstrained firms
+    # Unconstrained firms
     print("\nUnconstrained Firms: CF_t and MB_t-1")
-    for dep_var in dependent_vars:
-        result = run_ols_regression(
-            unconstrained_data, dep_var, ['cash_flow_scaled', 'mb_lag']
-        )
-        table4_results['unconstrained'][dep_var] = result
-    
+    unconstrained_results_dict = {}
+    if not unconstrained_data.empty:
+        for dep_var in dependent_vars:
+            formula = f"{dep_var} ~ {model_rhs} {fe_str}"
+            try:
+                result_df = OCTOPUS_INSTANCE.run_regressions(
+                    df=unconstrained_data, regression_commands=['felm'],
+                    regression_specifications=[formula], stargazer_specs=[]
+                )
+                unconstrained_results_dict[dep_var] = result_df
+            except Exception as e:
+                print(f"Error running R regression for unconstrained {dep_var} ~ {model_rhs}: {e}")
+                unconstrained_results_dict[dep_var] = pd.DataFrame()
+    table4_results['unconstrained'] = unconstrained_results_dict
+        
     return table4_results
 
 
 def run_table6_regressions(data):
     """
-    Replicate Table 6 from the original paper: IV investment-cash flow regressions.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        
-    Returns:
-        dict: Dictionary of IV regression results
+    Replicate Table 6: IV investment-cash flow regressions using felm.
+    Endogenous variable is 'mb_lag'.
     """
-    print("\nReplicating Table 6: IV Investment-Cash Flow Regressions")
+    if OCTOPUS_INSTANCE is None:
+        raise RuntimeError("Octopus instance not initialized. Cannot run R regressions.")
+
+    print("\nReplicating Table 6: IV Investment-Cash Flow Regressions (via R felm)")
     print("=" * 70)
     
-    # Dependent variables (uses of cash flow)
     dependent_vars = [
         'delta_cash_scaled', 'delta_nwc_scaled', 
         'capx1_scaled', 'capx2_scaled', 'capx3_scaled',
         'delta_debt_scaled', 'issues_scaled', 'div_scaled'
     ]
-    
-    # Store results
     table6_results = {}
+    fe_and_cluster_str = "| factor(gvkey) + factor(fyear) | {iv_spec} | gvkey + fyear"
+
+    # Model 1: Controls: CF_t. Endog: MB_t-1. Instruments for MB_t-1: CF_t, Returns
+    print("\nModel 1: Controls: CF_t. Endog: MB_t-1. IV: CF_t, Returns")
+    m1_controls = ['cash_flow_scaled']
+    m1_endog = 'mb_lag'
+    m1_instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
+    m1_controls_rhs = " + ".join(m1_controls)
+    m1_iv_spec = f"({m1_endog} ~ {' + '.join(m1_instruments)})"
+    m1_formula_template = f"{{dep_var}} ~ {m1_controls_rhs} {fe_and_cluster_str.format(iv_spec=m1_iv_spec)}"
     
-    # Model 1: CF_t and MB_t-1 (instrumented by CF_t and return lags)
-    print("\nModel 1: CF_t and MB_t-1 (IV)")
-    model1_results = {}
+    model1_results_dict = {}
     for dep_var in dependent_vars:
-        # Run IV regression using returns as instruments for MB
-        instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-        first_stage, second_stage = run_iv_regression(
-            data, dep_var, 'mb_lag', instruments, ['cash_flow_scaled']
-        )
-        model1_results[dep_var] = (first_stage, second_stage)
-    
-    table6_results['model1'] = model1_results
-    
-    # Model 2: Add CF_t-1
-    print("\nModel 2: Add CF_t-1 (IV)")
-    model2_results = {}
+        formula = m1_formula_template.format(dep_var=dep_var)
+        try:
+            result_df = OCTOPUS_INSTANCE.run_regressions(
+                df=data, regression_commands=['felm'],
+                regression_specifications=[formula], stargazer_specs=[]
+            )
+            # Note: felm names the endogenous variable like `fit_mb_lag` or similar in output if IV is used.
+            # The coefficient for the instrumented variable will be for 'mb_lag'.
+            model1_results_dict[dep_var] = result_df
+        except Exception as e:
+            print(f"Error running R IV regression for {dep_var} (Model 1): {e}")
+            model1_results_dict[dep_var] = pd.DataFrame()
+    table6_results['model1'] = model1_results_dict
+
+    # Model 2: Controls: CF_t, CF_t-1. Endog: MB_t-1. Instruments for MB_t-1: CF_t, CF_t-1, Returns
+    print("\nModel 2: Controls: CF_t, CF_t-1. Endog: MB_t-1. IV: CF_t, CF_t-1, Returns")
+    m2_controls = ['cash_flow_scaled', 'cash_flow_scaled_lag']
+    m2_endog = 'mb_lag'
+    m2_instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
+    m2_controls_rhs = " + ".join(m2_controls)
+    m2_iv_spec = f"({m2_endog} ~ {' + '.join(m2_instruments)})"
+    m2_formula_template = f"{{dep_var}} ~ {m2_controls_rhs} {fe_and_cluster_str.format(iv_spec=m2_iv_spec)}"
+
+    model2_results_dict = {}
     for dep_var in dependent_vars:
-        instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-        first_stage, second_stage = run_iv_regression(
-            data, dep_var, 'mb_lag', instruments, 
-            ['cash_flow_scaled', 'cash_flow_scaled_lag']
-        )
-        model2_results[dep_var] = (first_stage, second_stage)
+        formula = m2_formula_template.format(dep_var=dep_var)
+        try:
+            result_df = OCTOPUS_INSTANCE.run_regressions(
+                df=data, regression_commands=['felm'],
+                regression_specifications=[formula], stargazer_specs=[]
+            )
+            model2_results_dict[dep_var] = result_df
+        except Exception as e:
+            print(f"Error running R IV regression for {dep_var} (Model 2): {e}")
+            model2_results_dict[dep_var] = pd.DataFrame()
+    table6_results['model2'] = model2_results_dict
+
+    # Model 3: Controls: CF_t, CF_t-1, CASH_t-1, DEBT_t-1. Endog: MB_t-1. Instruments for MB_t-1: CF_t, CF_t-1, Returns
+    print("\nModel 3: Controls: CF_t, CF_t-1, CASH_t-1, DEBT_t-1. Endog: MB_t-1. IV: CF_t, CF_t-1, Returns")
+    m3_controls = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'cash_lag', 'debt_lag']
+    m3_endog = 'mb_lag'
+    # Instruments for MB_t-1 are same as Model 2 for this specific table structure in original paper
+    m3_instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4'] 
+    m3_controls_rhs = " + ".join(m3_controls)
+    m3_iv_spec = f"({m3_endog} ~ {' + '.join(m3_instruments)})"
+    m3_formula_template = f"{{dep_var}} ~ {m3_controls_rhs} {fe_and_cluster_str.format(iv_spec=m3_iv_spec)}"
     
-    table6_results['model2'] = model2_results
-    
-    # Model 3: Add CASH_t-1 and DEBT_t-1
-    print("\nModel 3: Add CASH_t-1 and DEBT_t-1 (IV)")
-    model3_results = {}
+    model3_results_dict = {}
     for dep_var in dependent_vars:
-        instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-        controls = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'cash_lag', 'debt_lag']
-        first_stage, second_stage = run_iv_regression(
-            data, dep_var, 'mb_lag', instruments, controls
-        )
-        model3_results[dep_var] = (first_stage, second_stage)
-    
-    table6_results['model3'] = model3_results
+        formula = m3_formula_template.format(dep_var=dep_var)
+        try:
+            result_df = OCTOPUS_INSTANCE.run_regressions(
+                df=data, regression_commands=['felm'],
+                regression_specifications=[formula], stargazer_specs=[]
+            )
+            model3_results_dict[dep_var] = result_df
+        except Exception as e:
+            print(f"Error running R IV regression for {dep_var} (Model 3): {e}")
+            model3_results_dict[dep_var] = pd.DataFrame()
+    table6_results['model3'] = model3_results_dict
     
     return table6_results
 
 
 def run_table7_regressions(data):
     """
-    Replicate Table 7 from the original paper: IV regressions for constrained vs. unconstrained firms.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        
-    Returns:
-        dict: Dictionary of IV regression results for constrained and unconstrained subsamples
+    Replicate Table 7: IV by constraint using felm.
+    Dep var is 'capx3_scaled'. Endogenous var is 'mb_lag'.
     """
-    print("\nReplicating Table 7: IV Regressions by Financial Constraint")
+    if OCTOPUS_INSTANCE is None:
+        raise RuntimeError("Octopus instance not initialized. Cannot run R regressions.")
+
+    print("\nReplicating Table 7: IV Regressions by Financial Constraint (via R felm)")
     print("=" * 70)
     
-    # Focus on CAPX3 (fixed investment) as the key dependent variable
-    dep_var = 'capx3_scaled'
+    dep_var = 'capx3_scaled' # Fixed dependent variable for this table
     
-    # Create constrained and unconstrained subsamples
     constrained_data = data[data['constrained'] == 1].copy()
     unconstrained_data = data[data['unconstrained'] == 1].copy()
     
     print(f"Constrained subsample: {len(constrained_data)} observations")
     print(f"Unconstrained subsample: {len(unconstrained_data)} observations")
     
-    # Store results
     table7_results = {'constrained': {}, 'unconstrained': {}}
-    
-    # Model 1: CF_t and MB_t-1 (IV)
-    print("\nModel 1: CF_t and MB_t-1 (IV)")
-    
-    # Constrained firms
-    instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-    first_stage, second_stage = run_iv_regression(
-        constrained_data, dep_var, 'mb_lag', instruments, ['cash_flow_scaled']
-    )
-    table7_results['constrained']['model1'] = (first_stage, second_stage)
-    
-    # Unconstrained firms
-    first_stage, second_stage = run_iv_regression(
-        unconstrained_data, dep_var, 'mb_lag', instruments, ['cash_flow_scaled']
-    )
-    table7_results['unconstrained']['model1'] = (first_stage, second_stage)
-    
-    # Model 2: Add CF_t-1 (IV)
-    print("\nModel 2: Add CF_t-1 (IV)")
-    
-    # Constrained firms
-    instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-    first_stage, second_stage = run_iv_regression(
-        constrained_data, dep_var, 'mb_lag', instruments, 
-        ['cash_flow_scaled', 'cash_flow_scaled_lag']
-    )
-    table7_results['constrained']['model2'] = (first_stage, second_stage)
-    
-    # Unconstrained firms
-    first_stage, second_stage = run_iv_regression(
-        unconstrained_data, dep_var, 'mb_lag', instruments, 
-        ['cash_flow_scaled', 'cash_flow_scaled_lag']
-    )
-    table7_results['unconstrained']['model2'] = (first_stage, second_stage)
-    
-    # Model 3: Add CASH_t-1 and DEBT_t-1 (IV)
-    print("\nModel 3: Add CASH_t-1 and DEBT_t-1 (IV)")
-    
-    # Constrained firms
-    instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
-    controls = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'cash_lag', 'debt_lag']
-    first_stage, second_stage = run_iv_regression(
-        constrained_data, dep_var, 'mb_lag', instruments, controls
-    )
-    table7_results['constrained']['model3'] = (first_stage, second_stage)
-    
-    # Unconstrained firms
-    first_stage, second_stage = run_iv_regression(
-        unconstrained_data, dep_var, 'mb_lag', instruments, controls
-    )
-    table7_results['unconstrained']['model3'] = (first_stage, second_stage)
-    
+    fe_and_cluster_str = "| factor(gvkey) + factor(fyear) | {iv_spec} | gvkey + fyear"
+
+    # IV Model specifications (same as Table 6)
+    # Model 1
+    m1_controls = ['cash_flow_scaled']
+    m1_endog = 'mb_lag'
+    m1_instruments = ['cash_flow_scaled', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
+    m1_controls_rhs = " + ".join(m1_controls)
+    m1_iv_spec = f"({m1_endog} ~ {' + '.join(m1_instruments)})"
+    m1_formula = f"{dep_var} ~ {m1_controls_rhs} {fe_and_cluster_str.format(iv_spec=m1_iv_spec)}"
+
+    # Model 2
+    m2_controls = ['cash_flow_scaled', 'cash_flow_scaled_lag']
+    m2_endog = 'mb_lag'
+    m2_instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
+    m2_controls_rhs = " + ".join(m2_controls)
+    m2_iv_spec = f"({m2_endog} ~ {' + '.join(m2_instruments)})"
+    m2_formula = f"{dep_var} ~ {m2_controls_rhs} {fe_and_cluster_str.format(iv_spec=m2_iv_spec)}"
+
+    # Model 3
+    m3_controls = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'cash_lag', 'debt_lag']
+    m3_endog = 'mb_lag'
+    m3_instruments = ['cash_flow_scaled', 'cash_flow_scaled_lag', 'ret_1', 'ret_2', 'ret_3', 'ret_4']
+    m3_controls_rhs = " + ".join(m3_controls)
+    m3_iv_spec = f"({m3_endog} ~ {' + '.join(m3_instruments)})"
+    m3_formula = f"{dep_var} ~ {m3_controls_rhs} {fe_and_cluster_str.format(iv_spec=m3_iv_spec)}"
+
+    models_specs = {
+        'model1': m1_formula,
+        'model2': m2_formula,
+        'model3': m3_formula
+    }
+
+    for group_name, group_data in [('constrained', constrained_data), ('unconstrained', unconstrained_data)]:
+        print(f"\n{group_name.capitalize()} Firms (Table 7 IV models)")
+        group_results_dict = {}
+        if not group_data.empty:
+            for model_key, formula_str in models_specs.items():
+                print(f"Running {model_key} for {group_name} firms...")
+                try:
+                    result_df = OCTOPUS_INSTANCE.run_regressions(
+                        df=group_data, regression_commands=['felm'],
+                        regression_specifications=[formula_str], stargazer_specs=[]
+                    )
+                    group_results_dict[model_key] = result_df
+                except Exception as e:
+                    print(f"Error running R IV regression for {group_name} {dep_var} ({model_key}): {e}")
+                    group_results_dict[model_key] = pd.DataFrame()
+        table7_results[group_name] = group_results_dict
+            
     return table7_results
 
 
-def create_summary_table(results_dict, model_name, key_vars):
+def create_summary_table(results_dict_for_table_model, model_name, key_vars):
     """
-    Create a summary table of regression results.
-    
-    Args:
-        results_dict (dict): Dictionary of regression results
-        model_name (str): Name of model to summarize
-        key_vars (list): List of key variables to include in summary
-        
-    Returns:
-        pd.DataFrame: Summary table
+    Create a summary table of regression results from octopus DataFrames.
+    results_dict_for_table_model is the full dictionary for a table (e.g., table3_results).
+    model_name is 'model1', 'model2', etc.
     """
-    # Extract results for the specified model
-    model_results = results_dict[model_name]
+    dep_var_results_dict = results_dict_for_table_model.get(model_name, {})
     
-    # Initialize dictionaries to store coefficients and t-stats
-    coefs = {}
-    t_stats = {}
+    coefs_data = {}
+    t_stats_data = {}
     r2_values = {}
-    n_obs = {}
+    n_obs_values = {}
     
-    # Extract results for each dependent variable
-    for dep_var, result in model_results.items():
-        coefs[dep_var] = {}
-        t_stats[dep_var] = {}
+    for dep_var, result_df in dep_var_results_dict.items():
+        if result_df.empty:
+            print(f"Skipping {dep_var} for model {model_name} due to empty result_df.")
+            continue
+
+        coefs_data[dep_var] = {}
+        t_stats_data[dep_var] = {}
         
-        # Store R-squared and observation count
-        r2_values[dep_var] = result.rsquared
-        n_obs[dep_var] = result.nobs
+        # R-squared and N.obs are the same for all rows of a given regression, take from first row
+        r2_values[dep_var] = result_df['r_squared'].iloc[0]
+        n_obs_values[dep_var] = result_df['n_obs'].iloc[0]
         
-        # Store coefficients and t-stats for key variables
-        for var in key_vars:
-            if var in result.params.index:
-                coefs[dep_var][var] = result.params[var]
-                t_stats[dep_var][var] = result.tvalues[var]
+        for var_to_extract in key_vars:
+            coeff_row = result_df[result_df['variable'] == var_to_extract]
+            if not coeff_row.empty:
+                coef_val = coeff_row['coefficient'].iloc[0]
+                std_err = coeff_row['std_error'].iloc[0]
+                coefs_data[dep_var][var_to_extract] = coef_val
+                t_stats_data[dep_var][var_to_extract] = coef_val / std_err if std_err != 0 and not pd.isna(std_err) else np.nan
+            else:
+                coefs_data[dep_var][var_to_extract] = np.nan
+                t_stats_data[dep_var][var_to_extract] = np.nan
     
-    # Create summary dataframes
-    coef_df = pd.DataFrame(coefs).T
-    tstat_df = pd.DataFrame(t_stats).T
+    coef_df = pd.DataFrame.from_dict(coefs_data, orient='index')
+    tstat_df = pd.DataFrame.from_dict(t_stats_data, orient='index')
     
     # Add R-squared and observation count
-    coef_df['R-squared'] = pd.Series(r2_values)
-    coef_df['N'] = pd.Series(n_obs)
-    
+    if coef_df.empty and not r2_values and not n_obs_values: # Handle case where no results were processed
+         coef_df['R-squared'] = pd.Series(dtype='float64')
+         coef_df['N'] = pd.Series(dtype='float64')
+    else:
+        coef_df['R-squared'] = pd.Series(r2_values)
+        coef_df['N'] = pd.Series(n_obs_values)
+
+    # Ensure key_vars are columns, even if all NaN
+    for kvar in key_vars:
+        if kvar not in coef_df.columns:
+            coef_df[kvar] = np.nan
+        if kvar not in tstat_df.columns:
+            tstat_df[kvar] = np.nan
+            
     return coef_df, tstat_df
 
 
 def save_regression_results(results_dict, output_dir):
     """
     Save regression results to CSV files.
-    
-    Args:
-        results_dict (dict): Dictionary of regression results
-        output_dir (str): Directory to save results
+    results_dict contains table names as keys, and their specific result structures as values.
+    Each table will be saved as a single CSV in a long format.
     """
-    # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    # Extract and save each table's results
-    for table_name, table_results in results_dict.items():
-        # Create a descriptive filename
-        filename = f"{table_name}_results.csv"
-        file_path = os.path.join(output_dir, filename)
+    for table_key, content_for_table in results_dict.items():
+        # table_key is 'table3', 'table4', etc.
+        # content_for_table is the dictionary returned by run_tableX_regressions
         
-        # Convert results to DataFrame and save
-        if isinstance(table_results, dict):
-            # Handle nested dictionaries (tables with multiple models)
-            summary_data = []
-            for model_name, model_results in table_results.items():
-                # Extract key information from each model
-                model_summary = {
-                    'model': model_name,
-                    'r2': model_results.rsquared,
-                    'nobs': model_results.nobs
-                }
-                # Add coefficients and t-stats for key variables
-                for var in model_results.params.index:
-                    if var != 'const' and not var.startswith(('firm', 'year')):
-                        model_summary[f"{var}_coef"] = model_results.params[var]
-                        model_summary[f"{var}_tstat"] = model_results.tvalues[var]
-                
-                summary_data.append(model_summary)
-            
-            # Create and save DataFrame
-            summary_df = pd.DataFrame(summary_data)
-            summary_df.to_csv(file_path, index=False)
+        all_rows_for_csv = []
+        
+        if table_key == 'table3' or table_key == 'table6':
+            # Structure: {'model1': {'dep_varA': df, 'dep_varB': df}, 'model2': ...}
+            for model_name, dep_var_dict in content_for_table.items():
+                for dep_var, result_df in dep_var_dict.items():
+                    if result_df.empty: continue
+                    row_base = {'table': table_key, 'model': model_name, 'dependent_variable': dep_var}
+                    row_base['r_squared'] = result_df['r_squared'].iloc[0]
+                    row_base['n_obs'] = result_df['n_obs'].iloc[0]
+                    for _, coeff_data in result_df.iterrows():
+                        var_name = coeff_data['variable']
+                        # In felm output, instrumented variables might be prefixed e.g. `fit_mb_lag` for the structural param
+                        # or just `mb_lag`. We use the 'variable' column as is.
+                        row_base[f"{var_name}_coef"] = coeff_data['coefficient']
+                        row_base[f"{var_name}_tstat"] = coeff_data['coefficient'] / coeff_data['std_error'] if coeff_data['std_error'] != 0 and not pd.isna(coeff_data['std_error']) else np.nan
+                    all_rows_for_csv.append(row_base)
+
+        elif table_key == 'table4':
+            # Structure: {'constrained': {'dep_varA': df, ...}, 'unconstrained': {'dep_varA': df, ...}}
+            for group_name, dep_var_dict in content_for_table.items():
+                for dep_var, result_df in dep_var_dict.items():
+                    if result_df.empty: continue
+                    row_base = {'table': table_key, 'constraint_group': group_name, 'dependent_variable': dep_var}
+                    # Table 4 has one model type implicitly
+                    row_base['model'] = 'model1' # Or derive if more models are added to table4
+                    row_base['r_squared'] = result_df['r_squared'].iloc[0]
+                    row_base['n_obs'] = result_df['n_obs'].iloc[0]
+                    for _, coeff_data in result_df.iterrows():
+                        var_name = coeff_data['variable']
+                        row_base[f"{var_name}_coef"] = coeff_data['coefficient']
+                        row_base[f"{var_name}_tstat"] = coeff_data['coefficient'] / coeff_data['std_error'] if coeff_data['std_error'] != 0 and not pd.isna(coeff_data['std_error']) else np.nan
+                    all_rows_for_csv.append(row_base)
+
+        elif table_key == 'table7':
+            # Structure: {'constrained': {'model1': df_capx3, ...}, 'unconstrained': ...}
+            # Dependent variable is fixed for table 7 ('capx3_scaled')
+            fixed_dep_var_table7 = 'capx3_scaled'
+            for group_name, model_dict in content_for_table.items():
+                for model_name, result_df in model_dict.items():
+                    if result_df.empty: continue
+                    row_base = {'table': table_key, 'constraint_group': group_name, 'model': model_name, 'dependent_variable': fixed_dep_var_table7}
+                    row_base['r_squared'] = result_df['r_squared'].iloc[0]
+                    row_base['n_obs'] = result_df['n_obs'].iloc[0]
+                    for _, coeff_data in result_df.iterrows():
+                        var_name = coeff_data['variable']
+                        row_base[f"{var_name}_coef"] = coeff_data['coefficient']
+                        row_base[f"{var_name}_tstat"] = coeff_data['coefficient'] / coeff_data['std_error'] if coeff_data['std_error'] != 0 and not pd.isna(coeff_data['std_error']) else np.nan
+                    all_rows_for_csv.append(row_base)
+        
+        if all_rows_for_csv:
+            summary_df = pd.DataFrame(all_rows_for_csv)
+            # Standardize column order somewhat for consistent CSVs
+            cols = list(summary_df.columns)
+            id_cols = [c for c in ['table', 'constraint_group', 'model', 'dependent_variable'] if c in cols]
+            stat_cols = [c for c in ['r_squared', 'n_obs'] if c in cols]
+            coeff_cols = sorted([c for c in cols if c.endswith('_coef')])
+            tstat_cols = sorted([c for c in cols if c.endswith('_tstat')])
+            ordered_cols = id_cols + stat_cols + coeff_cols + tstat_cols
+            # Add any missing columns that might have been generated (e.g. if some vars only appear in some regs)
+            ordered_cols.extend([c for c in cols if c not in ordered_cols])
+            summary_df = summary_df[ordered_cols]
+
+            filename = f"{table_key}_summary_results.csv" # Changed filename to reflect new format
+            file_path = os.path.join(output_dir, filename)
+            summary_df.to_csv(file_path, index=False, float_format='%.4f')
             print(f"Saved {filename}")
-    
-    print(f"All regression results saved to {output_dir}")
+        else:
+            print(f"No results to save for {table_key}")
+
+    print(f"All regression summary results saved to {output_dir}")
 
 
 def plot_investment_cash_flow_sensitivity(data, output_dir):
     """
-    Create plots of investment-cash flow sensitivity.
-    
-    Args:
-        data (pd.DataFrame): Regression sample data
-        output_dir (str): Directory to save plots
+    Plot investment-cash flow sensitivity for constrained and unconstrained firms.
+    This function remains largely unchanged as it uses the raw data, not regression objects.
     """
+    print("\nPlotting Investment-Cash Flow Sensitivity")
+    
     # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Set up the plot
+    plots_output_dir = os.path.join(output_dir, 'plots') # Specific plots subdir
+    if not os.path.exists(plots_output_dir):
+        os.makedirs(plots_output_dir)
+
+    # Ensure necessary columns exist
+    required_cols = ['constrained', 'unconstrained', 'cash_flow_scaled', 'capx3_scaled', 'fyear']
+    if not all(col in data.columns for col in required_cols):
+        print("Warning: Missing required columns for sensitivity plot. Skipping.")
+        return
+
+    constrained = data[data['constrained'] == 1]
+    unconstrained = data[data['unconstrained'] == 1]
+
     plt.figure(figsize=(12, 8))
-    sns.set_style("whitegrid")
+    if not constrained.empty:
+        sns.regplot(x='cash_flow_scaled', y='capx3_scaled', data=constrained, 
+                    scatter_kws={'alpha':0.3}, line_kws={'color':'red'}, label='Constrained')
+    if not unconstrained.empty:
+        sns.regplot(x='cash_flow_scaled', y='capx3_scaled', data=unconstrained, 
+                    scatter_kws={'alpha':0.3}, line_kws={'color':'blue'}, label='Unconstrained')
     
-    # Plot for constrained vs unconstrained firms
-    plt.subplot(2, 1, 1)
-    sns.regplot(x='cash_flow_scaled', y='capx3_scaled', 
-                data=data[data['constrained'] == 1], 
-                scatter_kws={'alpha':0.3}, line_kws={'color':'red'},
-                label='Constrained')
-    sns.regplot(x='cash_flow_scaled', y='capx3_scaled', 
-                data=data[data['unconstrained'] == 1], 
-                scatter_kws={'alpha':0.3}, line_kws={'color':'blue'},
-                label='Unconstrained')
     plt.title('Investment-Cash Flow Sensitivity: Constrained vs. Unconstrained Firms')
     plt.xlabel('Cash Flow / Net Assets')
     plt.ylabel('Investment (CAPX3) / Net Assets')
-    plt.legend()
-    
-    # Plot for high vs low Tobin's q firms
-    plt.subplot(2, 1, 2)
-    high_q = data['mb_lag'] > data['mb_lag'].median()
-    sns.regplot(x='cash_flow_scaled', y='capx3_scaled', 
-                data=data[high_q], 
-                scatter_kws={'alpha':0.3}, line_kws={'color':'green'},
-                label='High Q')
-    sns.regplot(x='cash_flow_scaled', y='capx3_scaled', 
-                data=data[~high_q], 
-                scatter_kws={'alpha':0.3}, line_kws={'color':'purple'},
-                label='Low Q')
-    plt.title('Investment-Cash Flow Sensitivity: High vs. Low Q Firms')
-    plt.xlabel('Cash Flow / Net Assets')
-    plt.ylabel('Investment (CAPX3) / Net Assets')
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'investment_cash_flow_sensitivity.png'), dpi=300)
+    if not constrained.empty or not unconstrained.empty:
+        plt.legend()
+    plt.savefig(os.path.join(plots_output_dir, 'investment_cf_sensitivity_scatter.png'), dpi=300)
     plt.close()
-    
-    print("Investment-cash flow sensitivity plots saved")
+    print("Investment-cash flow sensitivity scatter plot saved.")
+
+    # Note: The original plot also included sensitivity over time using OLS.
+    # This part would need to be refactored to use octopus if it's still desired
+    # or removed if this plot is just the scatter. For now, keeping it simple.
+    # The `run_baseline_analysis` in `analyze_results.py` does a more detailed version of this.
 
 
-def run_all_regressions(data_path, output_dir='../results'):
+def run_all_regressions(data_path, output_dir='../results/regression_tables'):
     """
     Run all regression analyses for the Lewellen and Lewellen replication.
-    
-    Args:
-        data_path (str): Path to regression sample data
-        output_dir (str): Directory to save results
-        
-    Returns:
-        dict: Dictionary of all regression results
+    Saves detailed summary CSVs for each table's results.
     """
-    # Load regression sample
+    # Ensure output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
+
     print(f"Loading regression sample from {data_path}")
-    data = pd.read_csv(data_path)
+    # Assuming data_path is to a Parquet file as used elsewhere
+    if data_path.endswith('.csv'):
+        data = pd.read_csv(data_path)
+    elif data_path.endswith('.parquet'):
+        data = pd.read_parquet(data_path)
+    else:
+        raise ValueError("Data path must be for a .csv or .parquet file.")
     print(f"Loaded {len(data)} observations")
     
-    # Run regressions from Tables 3, 4, 6, and 7
+    # Ensure 'gvkey' and 'fyear' are present for felm
+    if 'gvkey' not in data.columns or 'fyear' not in data.columns:
+        raise ValueError("Input data must contain 'gvkey' and 'fyear' columns for felm fixed effects and clustering.")
+
     results = {}
     
-    # Table 3: OLS investment-cash flow regressions
-    results['table3'] = run_table3_regressions(data)
+    results['table3'] = run_table3_regressions(data.copy()) # Pass copy to be safe
+    results['table4'] = run_table4_regressions(data.copy())
+    results['table6'] = run_table6_regressions(data.copy())
+    results['table7'] = run_table7_regressions(data.copy())
     
-    # Table 4: OLS regressions for constrained vs. unconstrained firms
-    results['table4'] = run_table4_regressions(data)
-    
-    # Table 6: IV investment-cash flow regressions
-    results['table6'] = run_table6_regressions(data)
-    
-    # Table 7: IV regressions for constrained vs. unconstrained firms
-    results['table7'] = run_table7_regressions(data)
-    
-    # Create plots
-    plot_investment_cash_flow_sensitivity(data, output_dir)
-    
-    # Save results
+    # Save all results
     save_regression_results(results, output_dir)
     
+    # Plotting (if any specific to this module, distinct from analyze_results.py)
+    # plot_investment_cash_flow_sensitivity(data, output_dir) # This was a simplified plot
+    
+    print(f"All regression analyses completed. Summary CSVs saved to {output_dir}")
     return results
 
-
+# Example of how to run (if this script were to be run directly)
 if __name__ == '__main__':
-    # Set up paths
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
-    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'results')
-    data_path = os.path.join(data_dir, 'regression_sample.csv')
+    # This is an example. Typically, analyze_results.py would call these functions.
+    # Ensure you have a prepared regression_sample.parquet file.
+    # Example path, adjust as needed:
+    example_data_path = '../../data/regression_sample.parquet' 
+    example_output_dir = '../../results/regression_analysis_output'
     
-    # Run regressions
-    if os.path.exists(data_path):
-        results = run_all_regressions(data_path, output_dir)
+    if os.path.exists(example_data_path):
+        print(f"Running example with data: {example_data_path}")
+        try:
+            all_results = run_all_regressions(example_data_path, example_output_dir)
+            print("Example run completed.")
+            
+            # Example: Create a specific summary table (like original Table 3, Model 1)
+            # if 'table3' in all_results and 'model1' in all_results['table3']:
+            #     key_vars_model1_t3 = ['cash_flow_scaled', 'mb_lag']
+            #     coef_df, tstat_df = create_summary_table(all_results['table3'], 'model1', key_vars_model1_t3)
+            #     print("\nTable 3, Model 1 Coefficients:")
+            #     print(coef_df.to_string(float_format="%.4f"))
+            #     print("\nTable 3, Model 1 T-stats:")
+            #     print(tstat_df.to_string(float_format="%.2f"))
+
+        except Exception as e:
+            print(f"Error during example run: {e}")
+            import traceback
+            traceback.print_exc()
     else:
-        print(f"Regression sample not found at {data_path}")
-        print("Please run src/main.py first to prepare the data.") 
+        print(f"Example data file not found at {example_data_path}. Skipping example run.") 
